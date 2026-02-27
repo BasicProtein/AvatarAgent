@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environment
+.venv/
+venv/
+env/
+miniconda3/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Logs
+logs/
+*.log
+
+# Output
+output/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (keep template, ignore actual config)
+# config/config.ini
+
+# Models & Resources (large files)
+resources/models/
+resources/voices/*.pt
+resources/voices/*.pth
+
+# FFmpeg & ImageMagick binaries
+ffmpeg/
+ImageMagick*/
+.ace-tool/
