@@ -54,6 +54,19 @@ class SynthesizeRequest(BaseModel):
     speed: float = Field(1.0, ge=0.5, le=2.0, description="语速倍率")
 
 
+class SynthesizeResponse(BaseModel):
+    """语音合成响应（含服务端绝对路径，供后续步骤使用）"""
+    audio_path: str = Field(..., description="服务端音频绝对路径")
+    audio_url: str = Field(..., description="HTTP 可访问的音频 URL")
+    duration: float = Field(0.0, description="音频时长（秒）")
+
+
+class VoiceTrainRequest(BaseModel):
+    """声音训练请求"""
+    name: str = Field(..., description="音色名称，10字以内")
+    audio_path: str = Field(..., description="参考音频服务端路径（已上传）")
+
+
 # ========== 数字人模块 ==========
 
 class AvatarModel(BaseModel):
@@ -74,6 +87,13 @@ class AvatarGenerateRequest(BaseModel):
     compress_inference: bool = Field(False)
     beautify_teeth: bool = Field(False)
     add_watermark: bool = Field(True)
+
+
+class AvatarSaveRequest(BaseModel):
+    """形象保存请求"""
+    name: str = Field(..., description="形象名称，10字以内")
+    video_path: str = Field(..., description="人脸视频服务端路径（已上传）")
+    description: str = Field("", description="形象描述（可选）")
 
 
 # ========== 视频后期模块 ==========

@@ -8,7 +8,7 @@ const pipeline = usePipelineStore()
 const voices = ref<VoiceItem[]>([])
 const selectedVoice = ref(0)
 const speed = ref(1.0)
-const audioUrl = ref('')
+const audioUrl = ref('')   // 浏览器本地播放 URL（Blob 或 /output/ 路径）
 
 onMounted(async () => {
   try {
@@ -25,15 +25,20 @@ async function handleSynthesize() {
   }
   pipeline.setStepLoading('synthesize', true)
   try {
-    const res = await audioApi.synthesize({
+    // 调用 /synthesize/path — 返回 JSON，包含服务端绝对路径
+    const res = await audioApi.synthesizePath({
       text,
       voice_id: selectedVoice.value,
       speed: speed.value,
     })
-    const blob = new Blob([res.data], { type: 'audio/wav' })
-    audioUrl.value = URL.createObjectURL(blob)
-    pipeline.audioPath = 'synthesized.wav'
-    pipeline.completeStep('synthesize')
+
+    // 存入 pipeline：供数字人步骤使用的服务端绝对路径
+    pipeline.audioPath = res.data.audio_path
+
+    // 构造浏览器可播放的 URL（/output/... 静态路径）
+    audioUrl.value = res.data.audio_url || ''
+
+    pipeline.completeStep('synthesize', { audio_path: res.data.audio_path })
     pipeline.setActiveStep('avatar')
     ElMessage.success('语音合成成功')
   } catch (e: unknown) {
@@ -58,7 +63,7 @@ async function handleSynthesize() {
           :label="voice.name"
           :value="idx"
         />
-        <el-option v-if="voices.length === 0" label="暂无音色（请添加音色文件）" :value="0" disabled />
+        <el-option v-if="voices.length === 0" label="暂无音色（请先在声音管理中添加）" :value="0" disabled />
       </el-select>
     </div>
 
@@ -80,6 +85,11 @@ async function handleSynthesize() {
     <div v-if="audioUrl" class="audio-preview">
       <p class="result-label">合成结果</p>
       <audio :src="audioUrl" controls style="width: 100%;" />
+    </div>
+
+    <div v-if="pipeline.audioPath && !audioUrl" class="audio-preview">
+      <p class="result-label">合成完成</p>
+      <p class="result-path">{{ pipeline.audioPath }}</p>
     </div>
   </div>
 </template>
@@ -126,5 +136,12 @@ async function handleSynthesize() {
   letter-spacing: 0.05em;
   font-weight: var(--font-medium);
   margin-bottom: var(--space-2);
+}
+
+.result-path {
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono);
+  word-break: break-all;
 }
 </style>

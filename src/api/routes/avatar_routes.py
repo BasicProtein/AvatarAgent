@@ -1,14 +1,46 @@
 """数字人路由"""
 
-from fastapi import APIRouter
+import json
+import shutil
+from pathlib import Path
 
-from src.api.schemas.models import AvatarGenerateRequest, AvatarModel, StatusResponse
-from src.avatar.heygem import HeyGemEngine, TuiliONNXEngine
+from fastapi import APIRouter, UploadFile, File, HTTPException
+
+from src.api.schemas.models import (
+    AvatarGenerateRequest,
+    AvatarSaveRequest,
+    AvatarModel,
+    StatusResponse,
+)
+from src.avatar.heygem import HeyGemEngine, TuiliONNXEngine, MODELS_DIR
+from src.common.config_manager import ConfigManager
+from src.common.file_utils import ensure_dir
 from src.common.logger import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
+config = ConfigManager()
 
+# 形象元数据文件
+AVATARS_META = MODELS_DIR / "avatars_meta.json"
+
+
+def _load_avatars_meta() -> list[dict]:
+    """读取已保存形象元数据列表"""
+    if AVATARS_META.exists():
+        try:
+            return json.loads(AVATARS_META.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_avatars_meta(data: list[dict]) -> None:
+    ensure_dir(MODELS_DIR)
+    AVATARS_META.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ─────────────────────────────── 模型/形象列表 ────────────────────────────
 
 @router.get("/models", response_model=list[AvatarModel])
 async def list_models():
@@ -23,6 +55,100 @@ async def list_faces():
     engine = TuiliONNXEngine()
     return engine.list_faces()
 
+
+@router.get("/saved")
+async def list_saved_avatars():
+    """获取已保存的自定义形象列表"""
+    return _load_avatars_meta()
+
+
+# ─────────────────────────── 视频文件上传 ────────────────────────────────
+
+@router.post("/upload")
+async def upload_avatar_video(file: UploadFile = File(...)):
+    """上传人脸视频文件，返回服务端保存路径，供后续「保存形象」使用。"""
+    suffix = Path(file.filename or "video.mp4").suffix.lower()
+    if suffix not in (".mp4", ".avi", ".mov", ".wmv", ".flv", ".mkv", ".webm"):
+        raise HTTPException(status_code=400, detail="仅支持 MP4/AVI/MOV/WMV/FLV/MKV/WEBM 格式")
+
+    upload_dir = config.get_output_dir() / "upload" / "avatar"
+    ensure_dir(upload_dir)
+
+    save_path = upload_dir / (file.filename or "avatar.mp4")
+    with open(save_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
+
+    logger.info(f"形象视频已上传: {save_path}")
+    return {"path": str(save_path), "filename": file.filename}
+
+
+# ─────────────────────────────── 形象保存 ────────────────────────────────
+
+@router.post("/save")
+async def save_avatar(req: AvatarSaveRequest):
+    """保存自定义形象：将视频注册为数字人模型。
+
+    将上传的人脸视频复制到 resources/models/<name>/ 目录，
+    并记录到 avatars_meta.json，供后续列表显示和生成时引用。
+    """
+    src = Path(req.video_path)
+    if not src.exists():
+        raise HTTPException(status_code=404, detail=f"视频文件不存在: {req.video_path}")
+
+    safe_name = "".join(c for c in req.name if c.isalnum() or c in ("-", "_", " ")).strip()
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="形象名称不合法")
+
+    # 保存到 models 目录
+    dest_dir = MODELS_DIR / safe_name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_file = dest_dir / src.name
+    shutil.copy2(str(src), str(dest_file))
+
+    # 更新元数据
+    avatars = _load_avatars_meta()
+    # 如果已存在同名则更新
+    avatars = [a for a in avatars if a.get("name") != safe_name]
+    avatars.append({
+        "name": safe_name,
+        "description": req.description,
+        "video_path": str(dest_file),
+        "model_dir": str(dest_dir),
+    })
+    _save_avatars_meta(avatars)
+
+    logger.info(f"形象「{safe_name}」已保存: {dest_dir}")
+    return {
+        "status": "success",
+        "message": f"形象「{safe_name}」已保存",
+        "avatar": {
+            "name": safe_name,
+            "description": req.description,
+            "video_path": str(dest_file),
+        },
+    }
+
+
+@router.delete("/saved/{avatar_name}")
+async def delete_avatar(avatar_name: str):
+    """删除已保存的自定义形象"""
+    avatars = _load_avatars_meta()
+    target = next((a for a in avatars if a.get("name") == avatar_name), None)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"形象不存在: {avatar_name}")
+
+    # 删除目录
+    dest_dir = Path(target.get("model_dir", ""))
+    if dest_dir.exists():
+        shutil.rmtree(str(dest_dir), ignore_errors=True)
+
+    avatars = [a for a in avatars if a.get("name") != avatar_name]
+    _save_avatars_meta(avatars)
+    return {"status": "success", "message": f"形象「{avatar_name}」已删除"}
+
+
+# ─────────────────────────────── 视频生成 ────────────────────────────────
 
 @router.post("/generate")
 async def generate_avatar(req: AvatarGenerateRequest):
@@ -49,6 +175,8 @@ async def generate_avatar(req: AvatarGenerateRequest):
         )
     return result
 
+
+# ─────────────────────────────── 服务状态 ────────────────────────────────
 
 @router.get("/service/heygem/status")
 async def heygem_status():

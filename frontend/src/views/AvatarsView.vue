@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { avatarApi, type AvatarModel } from '../api/avatar'
+import { avatarApi, type AvatarModel, type SavedAvatar } from '../api/avatar'
 import { ElMessage } from 'element-plus'
+import type { UploadFile, UploadRawFile } from 'element-plus'
 
 const models = ref<AvatarModel[]>([])
+const savedAvatars = ref<SavedAvatar[]>([])
 const loading = ref(false)
 
 // Add avatar form
@@ -12,24 +14,38 @@ const avatarNameMaxLen = 10
 const avatarDesc = ref('')
 const avatarDescMaxLen = 200
 const savingAvatar = ref(false)
+const selectedFile = ref<File | null>(null)
+const uploadProgress = ref(0)
 
 onMounted(async () => {
   loading.value = true
   try {
-    const res = await avatarApi.listModels()
-    models.value = res.data
+    const [modelsRes, savedRes] = await Promise.all([
+      avatarApi.listModels().catch(() => ({ data: [] })),
+      avatarApi.listSaved().catch(() => ({ data: [] })),
+    ])
+    models.value = modelsRes.data
+    savedAvatars.value = savedRes.data
   } catch { /* ignore */ }
   finally { loading.value = false }
 })
 
 async function refreshModels() {
   try {
-    const res = await avatarApi.listModels()
-    models.value = res.data
+    const [modelsRes, savedRes] = await Promise.all([
+      avatarApi.listModels(),
+      avatarApi.listSaved(),
+    ])
+    models.value = modelsRes.data
+    savedAvatars.value = savedRes.data
     ElMessage.success('已刷新')
   } catch {
     ElMessage.error('刷新失败')
   }
+}
+
+function onFileChange(file: UploadFile) {
+  selectedFile.value = file.raw as UploadRawFile
 }
 
 async function handleSaveAvatar() {
@@ -37,12 +53,56 @@ async function handleSaveAvatar() {
     ElMessage.warning('请输入形象名称')
     return
   }
+  if (!selectedFile.value) {
+    ElMessage.warning('请选择人脸视频文件')
+    return
+  }
   savingAvatar.value = true
-  setTimeout(() => {
+  uploadProgress.value = 0
+  try {
+    // Step 1: 上传视频，获取服务端路径
+    ElMessage.info('上传视频中...')
+    const uploadRes = await avatarApi.uploadVideo(selectedFile.value)
+    const serverPath = uploadRes.data.path
+    uploadProgress.value = 50
+
+    // Step 2: 注册为形象
+    await avatarApi.saveAvatar({
+      name: avatarName.value.trim(),
+      video_path: serverPath,
+      description: avatarDesc.value,
+    })
+    uploadProgress.value = 100
+
+    ElMessage.success(`形象「${avatarName.value}」已保存`)
+    // 刷新列表
+    const savedRes = await avatarApi.listSaved()
+    savedAvatars.value = savedRes.data
+    // 清空表单
+    avatarName.value = ''
+    avatarDesc.value = ''
+    selectedFile.value = null
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '保存失败'
+    ElMessage.error(msg)
+  } finally {
     savingAvatar.value = false
-    ElMessage.info('形象保存功能即将上线')
-  }, 1000)
+    uploadProgress.value = 0
+  }
 }
+
+async function handleDeleteAvatar(name: string) {
+  try {
+    await avatarApi.deleteAvatar(name)
+    savedAvatars.value = savedAvatars.value.filter(a => a.name !== name)
+    ElMessage.success(`已删除形象「${name}」`)
+  } catch {
+    ElMessage.error('删除失败')
+  }
+}
+
+// 合并展示：models 目录中的 + 已保存的自定义形象
+const allAvatars = ref<{ name: string; description?: string; tag: string }[]>([])
 </script>
 
 <template>
@@ -68,10 +128,14 @@ async function handleSaveAvatar() {
             :auto-upload="false"
             accept=".mp4,.avi,.mov,.wmv,.flv,.mkv,.webm"
             class="video-uploader"
+            :on-change="onFileChange"
+            :show-file-list="false"
           >
             <div class="upload-inner">
               <el-icon :size="40" color="var(--color-text-placeholder)"><UploadFilled /></el-icon>
-              <p class="upload-main-text">点击或拖拽视频文件到此区域</p>
+              <p class="upload-main-text">
+                {{ selectedFile ? selectedFile.name : '点击或拖拽视频文件到此区域' }}
+              </p>
               <div class="upload-hints">
                 <p>支持 MP4、AVI、MOV、WMV、FLV、MKV、WEBM 格式</p>
                 <p>最大 500MB，分辨率建议 720P 或 1080P</p>
@@ -80,6 +144,12 @@ async function handleSaveAvatar() {
               </div>
             </div>
           </el-upload>
+          <el-progress
+            v-if="uploadProgress > 0"
+            :percentage="uploadProgress"
+            :show-text="false"
+            style="margin-top: 8px;"
+          />
         </div>
 
         <!-- Right: Info Form -->
@@ -137,34 +207,54 @@ async function handleSaveAvatar() {
         </el-button>
       </div>
 
-      <div v-if="models.length > 0" class="avatar-grid">
+      <!-- 已保存自定义形象 -->
+      <div v-if="savedAvatars.length > 0" class="avatar-grid">
+        <div
+          v-for="avatar in savedAvatars"
+          :key="avatar.name"
+          class="avatar-card"
+        >
+          <div class="avatar-thumb">
+            <el-icon :size="32" color="var(--color-text-placeholder)"><User /></el-icon>
+          </div>
+          <div class="avatar-info-bar">
+            <h4 class="avatar-name">{{ avatar.name }}</h4>
+            <div class="avatar-actions">
+              <el-button
+                :icon="Delete as any"
+                circle size="small" type="danger"
+                @click.stop="handleDeleteAvatar(avatar.name)"
+              />
+            </div>
+          </div>
+          <div class="avatar-meta">
+            <span class="meta-tag">自定义</span>
+            <span class="meta-text">{{ avatar.description || avatar.video_path.split(/[/\\]/).pop() }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- HeyGem models 目录中的形象 -->
+      <div v-if="models.length > 0 && savedAvatars.length === 0" class="avatar-grid">
         <div
           v-for="model in models"
           :key="model.name"
           class="avatar-card"
         >
-          <!-- Thumbnail -->
           <div class="avatar-thumb">
             <el-icon :size="32" color="var(--color-text-placeholder)"><User /></el-icon>
           </div>
-
-          <!-- Info -->
           <div class="avatar-info-bar">
             <h4 class="avatar-name">{{ model.name }}</h4>
-            <div class="avatar-actions">
-              <el-button :icon="Edit as any" circle size="small" />
-              <el-button :icon="Delete as any" circle size="small" type="danger" />
-            </div>
           </div>
-
           <div class="avatar-meta">
-            <span class="meta-tag">MP4</span>
+            <span class="meta-tag">内置</span>
             <span class="meta-text">{{ model.path.split(/[/\\]/).pop() }}</span>
           </div>
         </div>
       </div>
 
-      <div v-else class="library-empty">
+      <div v-if="savedAvatars.length === 0 && models.length === 0" class="library-empty">
         <el-icon :size="40" color="var(--color-text-placeholder)"><User /></el-icon>
         <p>暂无数字人形象，请在上方上传视频并保存</p>
         <p class="empty-hint">也可将模型文件放入 resources/models/ 目录</p>

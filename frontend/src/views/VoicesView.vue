@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { audioApi, type VoiceItem } from '../api/audio'
 import { ElMessage } from 'element-plus'
+import type { UploadFile, UploadRawFile } from 'element-plus'
 
 const voices = ref<VoiceItem[]>([])
 const loading = ref(false)
@@ -11,6 +12,16 @@ const trainTab = ref<'upload' | 'record'>('upload')
 const voiceName = ref('')
 const voiceNameMaxLen = 10
 const trainingLoading = ref(false)
+const selectedAudioFile = ref<File | null>(null)
+
+// ─── Recording states ───
+const isRecording = ref(false)
+const recordDuration = ref(0)          // seconds
+const recordedBlob = ref<Blob | null>(null)
+const recordPreviewUrl = ref('')
+let mediaRecorder: MediaRecorder | null = null
+let recordingChunks: Blob[] = []
+let recordTimer: ReturnType<typeof setInterval> | null = null
 
 // Synthesis section
 const selectedVoiceIdx = ref(0)
@@ -31,6 +42,13 @@ const emotionOptions = [
 
 const speedValue = computed(() => (synthSpeed.value / 50).toFixed(1))
 
+/** 格式化录音时长 mm:ss */
+const formattedDuration = computed(() => {
+  const m = Math.floor(recordDuration.value / 60)
+  const s = recordDuration.value % 60
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+})
+
 onMounted(async () => {
   loading.value = true
   try {
@@ -38,6 +56,12 @@ onMounted(async () => {
     voices.value = res.data
   } catch { /* ignore */ }
   finally { loading.value = false }
+})
+
+onBeforeUnmount(() => {
+  // 离开页面时清理录音资源
+  stopRecordingCleanup()
+  if (recordPreviewUrl.value) URL.revokeObjectURL(recordPreviewUrl.value)
 })
 
 async function refreshVoices() {
@@ -50,17 +74,152 @@ async function refreshVoices() {
   }
 }
 
+function onAudioFileChange(file: UploadFile) {
+  selectedAudioFile.value = file.raw as UploadRawFile
+}
+
+// ─── Recording functions ───
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: 16000,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    })
+
+    // 优先使用 wav，fallback webm
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : 'audio/webm'
+
+    mediaRecorder = new MediaRecorder(stream, { mimeType })
+    recordingChunks = []
+    recordDuration.value = 0
+    recordedBlob.value = null
+    if (recordPreviewUrl.value) {
+      URL.revokeObjectURL(recordPreviewUrl.value)
+      recordPreviewUrl.value = ''
+    }
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) recordingChunks.push(e.data)
+    }
+
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(recordingChunks, { type: mimeType })
+      recordedBlob.value = blob
+      recordPreviewUrl.value = URL.createObjectURL(blob)
+
+      // 将 Blob 转为 File，供 handleTrain 使用
+      const ext = mimeType.includes('webm') ? 'webm' : 'wav'
+      const file = new File([blob], `recording_${Date.now()}.${ext}`, { type: mimeType })
+      selectedAudioFile.value = file
+
+      // 释放麦克风
+      stream.getTracks().forEach(t => t.stop())
+    }
+
+    mediaRecorder.start(250) // 每 250ms 生成一个 chunk
+    isRecording.value = true
+
+    // 计时器
+    recordTimer = setInterval(() => {
+      recordDuration.value++
+      // 最长 60 秒自动停止
+      if (recordDuration.value >= 60) {
+        stopRecording()
+      }
+    }, 1000)
+
+    ElMessage.success('开始录音，请朗读一段话...')
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '未知错误'
+    if (msg.includes('Permission') || msg.includes('NotAllowed')) {
+      ElMessage.error('麦克风权限被拒绝，请在浏览器设置中允许访问麦克风')
+    } else {
+      ElMessage.error(`无法启动录音: ${msg}`)
+    }
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop()
+  }
+  isRecording.value = false
+  if (recordTimer) {
+    clearInterval(recordTimer)
+    recordTimer = null
+  }
+}
+
+function stopRecordingCleanup() {
+  stopRecording()
+  if (mediaRecorder) {
+    // 释放可能残留的 stream
+    try {
+      mediaRecorder.stream?.getTracks().forEach(t => t.stop())
+    } catch { /* ignore */ }
+    mediaRecorder = null
+  }
+}
+
+function discardRecording() {
+  recordedBlob.value = null
+  if (recordPreviewUrl.value) {
+    URL.revokeObjectURL(recordPreviewUrl.value)
+    recordPreviewUrl.value = ''
+  }
+  selectedAudioFile.value = null
+  recordDuration.value = 0
+}
+
+// ─── Train (supports both upload & record) ───
+
 async function handleTrain() {
   if (!voiceName.value.trim()) {
     ElMessage.warning('请输入声音名称')
     return
   }
+  if (!selectedAudioFile.value) {
+    if (trainTab.value === 'record') {
+      ElMessage.warning('请先录制一段音频')
+    } else {
+      ElMessage.warning('请选择参考音频文件')
+    }
+    return
+  }
   trainingLoading.value = true
-  // TODO: actual training API call
-  setTimeout(() => {
+  try {
+    // Step 1: 上传参考音频
+    ElMessage.info('上传音频中...')
+    const uploadRes = await audioApi.uploadSample(selectedAudioFile.value)
+    const serverPath = uploadRes.data.path
+
+    // Step 2: 注册为音色
+    await audioApi.trainVoice({
+      name: voiceName.value.trim(),
+      audio_path: serverPath,
+    })
+
+    ElMessage.success(`音色「${voiceName.value}」训练完成`)
+    // 刷新音色列表
+    const res = await audioApi.listVoices()
+    voices.value = res.data
+    // 清空表单
+    voiceName.value = ''
+    selectedAudioFile.value = null
+    discardRecording()
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '训练失败'
+    ElMessage.error(msg)
+  } finally {
     trainingLoading.value = false
-    ElMessage.info('声音训练功能即将上线')
-  }, 1000)
+  }
 }
 
 async function handleSynthesize() {
@@ -68,8 +227,8 @@ async function handleSynthesize() {
     ElMessage.warning('请输入合成文本')
     return
   }
-  if (voices.length === 0) {
-    ElMessage.warning('请先选择产品模型')
+  if (voices.value.length === 0) {
+    ElMessage.warning('请先选择声音模型')
     return
   }
   synthLoading.value = true
@@ -127,10 +286,14 @@ async function handleSynthesize() {
             action=""
             :auto-upload="false"
             accept=".mp3,.wav,.m4a,.flac"
+            :on-change="onAudioFileChange"
+            :show-file-list="false"
           >
             <div class="upload-inner">
               <el-icon :size="36" color="var(--color-text-placeholder)"><Upload /></el-icon>
-              <p class="upload-main-text">点击或拖拽音频文件到此区域</p>
+              <p class="upload-main-text">
+                {{ selectedAudioFile ? selectedAudioFile.name : '点击或拖拽音频文件到此区域' }}
+              </p>
               <p class="upload-hint">支持 MP3、WAV、M4A 等格式</p>
               <p class="upload-hint">建议时长 5-30 秒，文件大小不超过 50MB</p>
             </div>
@@ -140,12 +303,44 @@ async function handleSynthesize() {
         <!-- Record area -->
         <div v-else class="record-area">
           <div class="record-placeholder">
-            <el-icon :size="36" color="var(--color-primary)"><Microphone /></el-icon>
-            <p>点击下方按钮开始录音</p>
-            <el-button type="primary" round>
-              <el-icon><VideoPlay /></el-icon>
-              开始录音
-            </el-button>
+            <!-- idle -->
+            <template v-if="!isRecording && !recordedBlob">
+              <el-icon :size="36" color="var(--color-primary)"><Microphone /></el-icon>
+              <p>点击下方按钮开始录音</p>
+              <el-button type="primary" round @click="startRecording">
+                <el-icon><VideoPlay /></el-icon>
+                开始录音
+              </el-button>
+              <p class="record-sub-hint">建议在安静环境下录制 5-30 秒清晰人声</p>
+            </template>
+
+            <!-- recording in progress -->
+            <template v-else-if="isRecording">
+              <div class="recording-indicator">
+                <span class="pulse-dot" />
+                <span class="recording-label">录音中</span>
+                <span class="recording-timer">{{ formattedDuration }}</span>
+              </div>
+              <div class="waveform">
+                <span v-for="i in 20" :key="i" class="wave-bar" :style="{ animationDelay: `${i * 0.06}s` }" />
+              </div>
+              <el-button type="danger" round @click="stopRecording">
+                <el-icon><VideoPause /></el-icon>
+                停止录音
+              </el-button>
+              <p class="record-sub-hint">最长 60 秒，点击停止结束录音</p>
+            </template>
+
+            <!-- recording done -->
+            <template v-else-if="recordedBlob">
+              <el-icon :size="36" color="var(--color-success)"><CircleCheck /></el-icon>
+              <p>录音完成（{{ formattedDuration }}）</p>
+              <audio v-if="recordPreviewUrl" :src="recordPreviewUrl" controls class="preview-audio" />
+              <el-button round @click="discardRecording">
+                <el-icon><RefreshRight /></el-icon>
+                重新录制
+              </el-button>
+            </template>
           </div>
         </div>
 
@@ -474,21 +669,111 @@ export default { components: { VideoPlay, Edit, Delete } }
   color: var(--color-text-tertiary);
 }
 
+/* ===== Record Area — Claude 风格 ===== */
 .record-area {
-  border: 2px dashed var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-page);
-  padding: var(--space-8) var(--space-4);
+  border: 1px solid rgba(31, 30, 29, 0.12);
+  border-radius: 12px;
+  background: rgba(250, 249, 245, 0.6);
+  padding: var(--space-8) var(--space-6);
+  min-height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
+/* 统一的 placeholder 容器 — 居中纵向排列 */
 .record-placeholder {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--space-3);
+  width: 100%;
   color: var(--color-text-secondary);
   font-size: var(--text-sm);
 }
+
+.record-placeholder p {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  font-weight: 400;
+  margin: 0;
+}
+
+.record-sub-hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  text-align: center;
+  line-height: 1.5;
+}
+
+/* ── 录音进行中 ── */
+.recording-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #C0392B;
+  animation: pulse-glow 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.75); }
+}
+
+.recording-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #C0392B;
+  letter-spacing: 0.01em;
+}
+
+.recording-timer {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  margin-left: var(--space-1);
+  letter-spacing: 0.05em;
+}
+
+/* 波形动画 */
+.waveform {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2.5px;
+  height: 36px;
+  padding: 0 var(--space-2);
+}
+
+.wave-bar {
+  width: 2.5px;
+  border-radius: 2px;
+  background: var(--color-primary);
+  opacity: 0.7;
+  animation: wave-bounce 0.9s ease-in-out infinite alternate;
+}
+
+@keyframes wave-bounce {
+  0%   { height: 4px;  opacity: 0.3; }
+  100% { height: 28px; opacity: 0.85; }
+}
+
+/* ── 录音完成 ── */
+.preview-audio {
+  width: 100%;
+  max-width: 320px;
+  border-radius: 10px;
+  height: 36px;
+}
+
 
 /* ===== Voice Name ===== */
 .voice-name-section {
