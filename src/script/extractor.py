@@ -1,14 +1,23 @@
 """对标视频文案提取模块
 
 从视频链接下载视频/音频，通过 ASR 识别转为文字。
-支持抖音等平台的短链接解析。
+
+音频获取策略（三层降级）：
+  1. 抖音/TikTok → douyin-tiktok-scraper 本地库（自动生成签名参数，无需 Cookie）
+  2. 层 1 失败 → api.douyin.wtf 公共 HTTP API（带 3 次重试，15s 超时/次）
+  3. 其他平台 / 前两层均失败 → yt-dlp CLI（支持 B 站、YouTube 等）
 """
 
-import os
+import asyncio
+import re
+import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
+
+import httpx
 
 from src.common.logger import get_logger
 from src.common.config_manager import ConfigManager
@@ -17,25 +26,50 @@ from src.common.file_utils import ensure_dir, generate_unique_filename
 
 logger = get_logger(__name__)
 
+# ── api.douyin.wtf 公共 API（层 2 备用）──
+_DOUYIN_API_BASE = "https://api.douyin.wtf/api"
+_API_TIMEOUT = 20.0       # 单次请求超时（秒）
+_API_RETRIES = 3          # 最多重试次数
+_API_RETRY_DELAY = 2.0    # 重试间隔（秒）
+
+_DOWNLOAD_TIMEOUT = 120.0  # 视频文件流式下载超时（秒）
+
+# 抖音 / TikTok 链接特征（含短链）
+_DOUYIN_PATTERNS = [
+    r"douyin\.com",
+    r"v\.douyin\.com",
+    r"tiktok\.com",
+    r"vm\.tiktok\.com",
+]
+
+
+def _is_douyin_url(url: str) -> bool:
+    """判断是否为抖音 / TikTok 链接"""
+    return any(re.search(p, url, re.IGNORECASE) for p in _DOUYIN_PATTERNS)
+
+
 
 class ScriptExtractor:
     """对标视频文案提取器
 
     工作流程：
-    1. 解析视频链接（支持短链接跳转）
-    2. 使用 yt-dlp 下载视频/提取音频
-    3. 使用 Whisper ASR 转录为文本
+    1. 判断链接平台
+    2a. 抖音/TikTok → api.douyin.wtf 解析无水印直链 → httpx 直接下载（无需 Cookie）
+    2b. 其他平台 / API 失败  → yt-dlp 回退下载
+    3. Whisper ASR 转录为中文文本
     """
 
     def __init__(self) -> None:
         self.config = ConfigManager()
         self._temp_dir = Path(tempfile.mkdtemp(prefix="avatar_extract_"))
 
+    # ──────────────────────────────── 公开方法 ────────────────────────────────
+
     def extract_from_url(self, video_url: str) -> str:
         """从视频链接提取口播文案
 
         Args:
-            video_url: 视频链接（支持抖音/快手等短链接）
+            video_url: 视频链接（支持抖音短链/长链/TikTok/B站等）
 
         Returns:
             提取的文案文本
@@ -46,47 +80,280 @@ class ScriptExtractor:
         try:
             logger.info(f"开始提取视频文案: {video_url}")
 
-            # Step 1: 下载音频
             audio_path = self._download_audio(video_url)
             logger.info(f"音频下载完成: {audio_path}")
 
-            # Step 2: ASR 转录
             text = self._transcribe(audio_path)
             logger.info(f"文案提取完成，长度: {len(text)} 字符")
-
             return text
 
+        except ScriptExtractError:
+            raise
         except Exception as e:
             raise ScriptExtractError(f"文案提取失败: {e}") from e
 
     def extract_from_audio(self, audio_path: str) -> str:
-        """从音频文件提取文案
+        """从本地音频文件提取文案
 
         Args:
             audio_path: 音频文件路径
 
         Returns:
             提取的文案文本
-
-        Raises:
-            ScriptExtractError: 提取失败
         """
         if not Path(audio_path).exists():
             raise ScriptExtractError(f"音频文件不存在: {audio_path}")
-
         try:
             return self._transcribe(audio_path)
         except Exception as e:
             raise ScriptExtractError(f"音频转录失败: {e}") from e
 
-    def _download_audio(self, url: str) -> str:
-        """使用 yt-dlp 从视频链接下载音频
+    def cleanup(self) -> None:
+        """清理临时文件"""
+        if self._temp_dir.exists():
+            shutil.rmtree(self._temp_dir, ignore_errors=True)
+            logger.info("已清理提取器临时文件")
 
-        Args:
-            url: 视频链接
+    # ──────────────────────────── 私有：音频下载 ─────────────────────────────
+
+    def _download_audio(self, url: str) -> str:
+        """下载音频，三层降级策略
 
         Returns:
-            下载的音频文件路径
+            本地音频文件绝对路径
+        """
+        if _is_douyin_url(url):
+            # 层 1：douyin-tiktok-scraper 本地库（最快，不依赖外网 API）
+            try:
+                return self._download_via_scraper_lib(url)
+            except Exception as e:
+                logger.warning(f"[层1] douyin-tiktok-scraper 失败: {e}")
+
+            # 层 2：api.douyin.wtf 公共 API（带重试）
+            try:
+                return self._download_via_douyin_api(url)
+            except Exception as e:
+                logger.warning(f"[层2] api.douyin.wtf 失败: {e}，回退到 yt-dlp")
+
+        # 层 3：yt-dlp（兜底，支持所有平台）
+        return self._download_via_ytdlp(url)
+
+    # ─────────────────── 层 1：douyin-tiktok-scraper 本地库 ──────────────────
+
+    def _download_via_scraper_lib(self, url: str) -> str:
+        """使用 douyin-tiktok-scraper Python 库本地解析，无需外网 API 调用
+
+        该库在本地自动生成 msToken / X-Bogus / A-Bogus 等签名参数，
+        直接请求抖音官方接口，无需 Cookie，无需代理。
+
+        Returns:
+            本地音频/视频文件路径
+        """
+        from douyin_tiktok_scraper.scraper import Scraper
+
+        # 在独立事件循环中运行异步库
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                result = pool.submit(self._run_scraper_sync, url).result()
+        else:
+            result = self._run_scraper_sync(url)
+
+        return result
+
+    def _run_scraper_sync(self, url: str) -> str:
+        """在新事件循环中同步运行 scraper（供 ThreadPoolExecutor 调用）"""
+        import asyncio
+        from douyin_tiktok_scraper.scraper import Scraper
+
+        async def _inner():
+            api = Scraper()
+            data = await api.hybrid_parsing(url)
+            return data
+
+        data = asyncio.run(_inner())
+
+        # 解析视频直链
+        video_direct_url = self._extract_url_from_scraper_data(data)
+        logger.info(f"[层1] scraper 解析成功，准备下载视频")
+
+        raw_path = self._temp_dir / generate_unique_filename("mp4", "raw")
+        self._stream_download(video_direct_url, raw_path)
+
+        wav_path = self._temp_dir / generate_unique_filename("wav", "audio")
+        if self._ffmpeg_extract_audio(str(raw_path), str(wav_path)):
+            raw_path.unlink(missing_ok=True)
+            return str(wav_path)
+        return str(raw_path)
+
+    def _extract_url_from_scraper_data(self, data: dict) -> str:
+        """从 scraper 返回数据中提取无水印视频直链"""
+        # douyin-tiktok-scraper 返回结构与 api.douyin.wtf 基本一致
+        video_info: dict = data.get("video") or {}
+        addr_block: dict = (
+            video_info.get("play_addr")
+            or video_info.get("download_addr")
+            or {}
+        )
+        url_list: list = addr_block.get("url_list", [])
+
+        if not url_list:
+            # 部分版本结构不同，尝试 bit_rate 列表
+            bit_rates = video_info.get("bit_rate") or []
+            for br in bit_rates:
+                ul = (br.get("play_addr") or {}).get("url_list", [])
+                if ul:
+                    url_list = ul
+                    break
+
+        if not url_list:
+            raise ScriptExtractError(
+                "scraper 返回数据中未找到视频直链（视频可能已删除）"
+            )
+        return url_list[0]
+
+    # ─────────────── 层 2：api.douyin.wtf 公共 HTTP API（带重试）────────────
+
+    def _download_via_douyin_api(self, url: str) -> str:
+        """通过 api.douyin.wtf 解析无水印直链并下载（带重试机制）
+
+        Returns:
+            本地音频/视频文件路径
+        """
+        video_url, title = self._resolve_douyin_url_with_retry(url)
+        logger.info(f"[层2] API 解析成功: {title}")
+
+        raw_path = self._temp_dir / generate_unique_filename("mp4", "raw")
+        self._stream_download(video_url, raw_path)
+        logger.info(f"[层2] 视频下载完成 ({raw_path.stat().st_size // 1024} KB)")
+
+        wav_path = self._temp_dir / generate_unique_filename("wav", "audio")
+        if self._ffmpeg_extract_audio(str(raw_path), str(wav_path)):
+            raw_path.unlink(missing_ok=True)
+            return str(wav_path)
+
+        logger.warning("[层2] ffmpeg 不可用，直接用视频文件进行 ASR")
+        return str(raw_path)
+
+    def _resolve_douyin_url_with_retry(self, url: str) -> Tuple[str, str]:
+        """调用 api.douyin.wtf，最多重试 _API_RETRIES 次"""
+        api_endpoint = f"{_DOUYIN_API_BASE}/hybrid/video_data"
+        last_err: Exception = RuntimeError("未知错误")
+
+        for attempt in range(1, _API_RETRIES + 1):
+            try:
+                with httpx.Client(
+                    timeout=_API_TIMEOUT,
+                    follow_redirects=True,
+                ) as client:
+                    resp = client.get(api_endpoint, params={"url": url, "minimal": "false"})
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                video_info: dict = data.get("video") or {}
+                addr_block: dict = (
+                    video_info.get("play_addr")
+                    or video_info.get("download_addr")
+                    or {}
+                )
+                url_list: list = addr_block.get("url_list", [])
+
+                if not url_list:
+                    raise ScriptExtractError("API 返回数据中未找到视频直链")
+
+                title = data.get("desc") or data.get("title") or "unknown"
+                return url_list[0], title
+
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                last_err = e
+                logger.warning(
+                    f"[层2] 第 {attempt}/{_API_RETRIES} 次请求超时/连接失败: {e}，"
+                    f"{'重试中...' if attempt < _API_RETRIES else '放弃'}"
+                )
+                if attempt < _API_RETRIES:
+                    time.sleep(_API_RETRY_DELAY)
+            except httpx.HTTPStatusError as e:
+                raise ScriptExtractError(
+                    f"api.douyin.wtf 返回 HTTP {e.response.status_code}"
+                ) from e
+
+        raise ScriptExtractError(f"api.douyin.wtf 多次请求均失败: {last_err}")
+
+
+
+    def _stream_download(self, url: str, dest: Path) -> None:
+        """流式下载文件，防止大文件一次性加载到内存"""
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.douyin.com/",
+        }
+        try:
+            with httpx.Client(timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
+                with client.stream("GET", url, headers=headers) as resp:
+                    resp.raise_for_status()
+                    with open(dest, "wb") as f:
+                        for chunk in resp.iter_bytes(chunk_size=8192):
+                            f.write(chunk)
+        except httpx.TimeoutException:
+            raise ScriptExtractError(f"视频文件下载超时（{_DOWNLOAD_TIMEOUT}s）")
+        except Exception as e:
+            raise ScriptExtractError(f"视频文件下载失败: {e}")
+
+    def _ffmpeg_extract_audio(self, input_path: str, output_wav: str) -> bool:
+        """用 ffmpeg 将视频/音频转为 16kHz 单声道 WAV（Whisper 最佳格式）
+
+        Returns:
+            True 表示成功，False 表示 ffmpeg 不可用或转换失败
+        """
+        try:
+            ffmpeg_bin = self.config.get_ffmpeg_path()
+        except Exception:
+            ffmpeg_bin = "ffmpeg"
+
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg_bin, "-y",
+                    "-i", input_path,
+                    "-vn",                    # 去掉视频流
+                    "-acodec", "pcm_s16le",   # 16-bit PCM WAV
+                    "-ar", "16000",           # 16kHz（Whisper 原生采样率）
+                    "-ac", "1",               # 单声道，减少文件大小
+                    output_wav,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                logger.info("ffmpeg 音频提取成功 (16kHz mono wav)")
+                return True
+            logger.warning(f"ffmpeg 返回非零退出码: {result.stderr[:200]}")
+            return False
+        except FileNotFoundError:
+            logger.warning("系统中未找到 ffmpeg，跳过音频提取步骤")
+            return False
+        except subprocess.TimeoutExpired:
+            logger.warning("ffmpeg 超时（60s）")
+            return False
+
+    def _download_via_ytdlp(self, url: str) -> str:
+        """方案 B（回退）：使用 yt-dlp CLI 下载音频（支持 B 站等非抖音平台）
+
+        Returns:
+            本地音频文件路径
+
+        Raises:
+            ScriptExtractError: 下载失败
         """
         output_path = str(self._temp_dir / generate_unique_filename("wav", "audio"))
 
@@ -95,6 +362,7 @@ class ScriptExtractor:
             "--extract-audio",
             "--audio-format", "wav",
             "--audio-quality", "0",
+            "--no-playlist",
             "-o", output_path,
             url,
         ]
@@ -104,59 +372,45 @@ class ScriptExtractor:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=180,
             )
             if result.returncode != 0:
-                raise ScriptExtractError(f"yt-dlp 下载失败: {result.stderr}")
+                raise ScriptExtractError(f"yt-dlp 下载失败: {result.stderr[:300]}")
 
-            # yt-dlp 可能修改扩展名，查找实际文件
+            # yt-dlp 可能自动修改扩展名（如 wav → m4a），搜索实际文件
             possible_path = Path(output_path)
             if possible_path.exists():
                 return str(possible_path)
 
-            # 查找同名但不同扩展名的文件
             for f in self._temp_dir.iterdir():
                 if f.stem == possible_path.stem:
                     return str(f)
 
-            raise ScriptExtractError("下载完成但未找到音频文件")
+            raise ScriptExtractError("yt-dlp 下载完成但未找到音频文件")
 
         except subprocess.TimeoutExpired:
-            raise ScriptExtractError("视频下载超时")
+            raise ScriptExtractError("yt-dlp 下载超时（超过 180 秒）")
+
+    # ──────────────────────────── 私有：ASR 转录 ─────────────────────────────
 
     def _transcribe(self, audio_path: str) -> str:
         """使用 Whisper 进行语音转录
 
-        Args:
-            audio_path: 音频文件路径
-
-        Returns:
-            转录文本
+        兼容同步和异步调用环境（FastAPI 路由内 / 独立脚本均可）
         """
         import asyncio
         from src.audio.asr import ASREngine
 
         asr = ASREngine()
         try:
-            # 尝试获取当前事件循环
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
 
         if loop and loop.is_running():
-            # 如果已在异步环境中，创建新线程运行
+            # 已在异步事件循环内（FastAPI），在独立线程中运行
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                result = pool.submit(
-                    asyncio.run, asr.transcribe(audio_path)
-                ).result()
-            return result
+                return pool.submit(asyncio.run, asr.transcribe(audio_path)).result()
         else:
             return asyncio.run(asr.transcribe(audio_path))
-
-    def cleanup(self) -> None:
-        """清理临时文件"""
-        import shutil
-        if self._temp_dir.exists():
-            shutil.rmtree(self._temp_dir, ignore_errors=True)
-            logger.info("已清理提取器临时文件")
