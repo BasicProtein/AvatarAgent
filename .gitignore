@@ -47,3 +47,6 @@ ImageMagick*/
 
 # ignore local whisper models
 whisper_local_test/models/*.pt
+
+# ignore local torch wheels
+torch_wheels/*.whl
