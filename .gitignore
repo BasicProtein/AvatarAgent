@@ -44,3 +44,6 @@ resources/voices/*.pth
 ffmpeg/
 ImageMagick*/
 .ace-tool/
+
+# ignore local whisper models
+whisper_local_test/models/*.pt
