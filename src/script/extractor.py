@@ -9,6 +9,8 @@
 """
 
 import asyncio
+import contextlib
+import os
 import re
 import shutil
 import subprocess
@@ -34,6 +36,12 @@ _API_RETRY_DELAY = 2.0    # 重试间隔（秒）
 
 _DOWNLOAD_TIMEOUT = 120.0  # 视频文件流式下载超时（秒）
 
+# 代理相关环境变量（访问抖音等国内站点时需要临时禁用）
+_PROXY_ENV_KEYS = [
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "all_proxy",
+]
+
 # 抖音 / TikTok 链接特征（含短链）
 _DOUYIN_PATTERNS = [
     r"douyin\.com",
@@ -47,6 +55,18 @@ def _is_douyin_url(url: str) -> bool:
     """判断是否为抖音 / TikTok 链接"""
     return any(re.search(p, url, re.IGNORECASE) for p in _DOUYIN_PATTERNS)
 
+
+@contextlib.contextmanager
+def _no_proxy():
+    """临时禁用代理环境变量（访问国内站点时避免代理干扰）"""
+    saved = {}
+    for key in _PROXY_ENV_KEYS:
+        if key in os.environ:
+            saved[key] = os.environ.pop(key)
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 class ScriptExtractor:
@@ -117,26 +137,156 @@ class ScriptExtractor:
     # ──────────────────────────── 私有：音频下载 ─────────────────────────────
 
     def _download_audio(self, url: str) -> str:
-        """下载音频，三层降级策略
+        """下载音频，四层降级策略
 
         Returns:
             本地音频文件绝对路径
         """
         if _is_douyin_url(url):
-            # 层 1：douyin-tiktok-scraper 本地库（最快，不依赖外网 API）
-            try:
-                return self._download_via_scraper_lib(url)
-            except Exception as e:
-                logger.warning(f"[层1] douyin-tiktok-scraper 失败: {e}")
+            # 国内站点禁用代理，避免代理干扰
+            with _no_proxy():
+                # 层 0：Playwright 浏览器渲染（最可靠，直接抓取视频流地址）
+                try:
+                    return self._download_via_playwright(url)
+                except Exception as e:
+                    logger.warning(f"[层0] Playwright 失败: {e}")
 
-            # 层 2：api.douyin.wtf 公共 API（带重试）
-            try:
-                return self._download_via_douyin_api(url)
-            except Exception as e:
-                logger.warning(f"[层2] api.douyin.wtf 失败: {e}，回退到 yt-dlp")
+                # 层 1：douyin-tiktok-scraper 本地库
+                try:
+                    return self._download_via_scraper_lib(url)
+                except Exception as e:
+                    logger.warning(f"[层1] douyin-tiktok-scraper 失败: {e}")
 
-        # 层 3：yt-dlp（兜底，支持所有平台）
+                # 层 2：api.douyin.wtf 公共 API（带重试）
+                try:
+                    return self._download_via_douyin_api(url)
+                except Exception as e:
+                    logger.warning(f"[层2] api.douyin.wtf 失败: {e}，回退到 yt-dlp")
+
+                # 层 3：yt-dlp（兜底，支持所有平台）
+                return self._download_via_ytdlp(url)
+
+        # 非抖音平台，直接 yt-dlp
         return self._download_via_ytdlp(url)
+
+    # ──────────────── 层 0：Playwright 浏览器渲染（最可靠）─────────────────
+
+    def _download_via_playwright(self, url: str) -> str:
+        """通过 Playwright 浏览器加载抖音分享页，捕获视频流地址并下载
+
+        使用移动端分享页（iesdouyin.com），自动点击播放按钮触发视频加载，
+        通过网络拦截获取真实视频 URL。
+
+        Returns:
+            本地音频/视频文件路径
+        """
+        video_id = self._extract_douyin_video_id(url)
+        if not video_id:
+            raise ScriptExtractError("无法从链接中提取抖音视频 ID")
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(self._run_playwright_sync, video_id).result()
+        else:
+            return self._run_playwright_sync(video_id)
+
+    def _extract_douyin_video_id(self, url: str) -> Optional[str]:
+        """从抖音链接中提取视频 ID（支持短链和长链）"""
+        # 长链：https://www.douyin.com/video/7614160296634027306
+        match = re.search(r"video/(\d+)", url)
+        if match:
+            return match.group(1)
+
+        # 短链需要先解析重定向获取真实 URL
+        try:
+            with httpx.Client(follow_redirects=True, timeout=15) as client:
+                resp = client.get(url, headers={
+                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X)"
+                })
+                match = re.search(r"video/(\d+)", str(resp.url))
+                if match:
+                    return match.group(1)
+        except Exception as e:
+            logger.warning(f"解析抖音短链失败: {e}")
+
+        return None
+
+    def _run_playwright_sync(self, video_id: str) -> str:
+        """在新事件循环中运行 Playwright 抓取视频"""
+
+        async def _inner():
+            from playwright.async_api import async_playwright
+
+            video_urls: list[str] = []
+            share_url = f"https://www.iesdouyin.com/share/video/{video_id}/"
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
+                        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                        "Version/16.6 Mobile/15E148 Safari/604.1"
+                    ),
+                    viewport={"width": 375, "height": 812},
+                    is_mobile=True,
+                )
+                page = await context.new_page()
+
+                async def on_response(response):
+                    ct = response.headers.get("content-type", "")
+                    if "video" in ct:
+                        video_urls.append(response.url)
+
+                page.on("response", on_response)
+
+                await page.goto(share_url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(3000)
+
+                # 点击播放按钮触发视频加载
+                play_btn = await page.query_selector(
+                    ".play-btn, [class*=play], .video-container"
+                )
+                if play_btn:
+                    await play_btn.click()
+                else:
+                    await page.click("body", position={"x": 187, "y": 300})
+                await page.wait_for_timeout(5000)
+
+                # 如果网络拦截没有捕获，尝试从 video 元素获取
+                if not video_urls:
+                    src = await page.evaluate("""() => {
+                        const v = document.querySelector('video');
+                        return v ? (v.src || v.currentSrc) : null;
+                    }""")
+                    if src and src.startswith("http"):
+                        video_urls.append(src)
+
+                await browser.close()
+
+            if not video_urls:
+                raise ScriptExtractError("Playwright 未能捕获到视频流地址")
+            return video_urls[0]
+
+        video_url = asyncio.run(_inner())
+        logger.info(f"[层0] Playwright 获取视频 URL 成功")
+
+        # 下载视频并提取音频
+        raw_path = self._temp_dir / generate_unique_filename("mp4", "raw")
+        self._stream_download(video_url, raw_path)
+        logger.info(f"[层0] 视频下载完成 ({raw_path.stat().st_size // 1024} KB)")
+
+        wav_path = self._temp_dir / generate_unique_filename("wav", "audio")
+        if self._ffmpeg_extract_audio(str(raw_path), str(wav_path)):
+            raw_path.unlink(missing_ok=True)
+            return str(wav_path)
+        return str(raw_path)
 
     # ─────────────────── 层 1：douyin-tiktok-scraper 本地库 ──────────────────
 

@@ -29,7 +29,9 @@ def main():
     # 设置 FFmpeg 环境变量
     ffmpeg_path = config.get("ffmpeg", "bin_path", "")
     if ffmpeg_path:
-        os.environ["PATH"] = ffmpeg_path + os.pathsep + os.environ.get("PATH", "")
+        # bin_path 可能是文件路径（如 ffmpeg.exe）或目录路径，统一取其所在目录
+        ffmpeg_dir = os.path.dirname(ffmpeg_path) if os.path.isfile(ffmpeg_path) else ffmpeg_path
+        os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
         os.environ["FFMPEG_PATH"] = ffmpeg_path
 
     logger.info(f"启动 AvatarAgent 后端服务: http://{host}:{port}")
