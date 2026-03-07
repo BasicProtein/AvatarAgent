@@ -108,7 +108,7 @@ class ConfigManager:
     def get_cosyvoice_url(self) -> str:
         """获取 CosyVoice 服务地址"""
         host = self.get("cosyvoice", "host", "127.0.0.1")
-        port = self.get("cosyvoice", "port", "5000")
+        port = self.get("cosyvoice", "port", "50000")
         return f"http://{host}:{port}"
 
     def get_heygem_url(self) -> str:

@@ -58,6 +58,16 @@ export const audioApi = {
     deleteVoice: (name: string) =>
         client.delete(`/api/audio/voices/${encodeURIComponent(name)}`),
 
+    /** 预览音色参考音频（返回音频 blob） */
+    previewVoice: (name: string) =>
+        client.get(`/api/audio/voices/${encodeURIComponent(name)}/preview`, { responseType: 'blob' }),
+
+    /** 重命名音色 */
+    renameVoice: (name: string, newName: string) =>
+        client.put(`/api/audio/voices/${encodeURIComponent(name)}`, null, {
+            params: { new_name: newName },
+        }),
+
     /** CosyVoice 服务状态 */
     checkStatus: () =>
         client.get<{ status: string }>('/api/audio/service/status'),

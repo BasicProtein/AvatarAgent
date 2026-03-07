@@ -45,8 +45,25 @@ ffmpeg/
 ImageMagick*/
 .ace-tool/
 
-# ignore local whisper models
+# Whisper local test
 whisper_local_test/models/*.pt
 
-# ignore local torch wheels
-torch_wheels/*.whl
+# Torch wheels (large binaries)
+torch_wheels/
+
+# Third-party dependencies (CosyVoice, models)
+third_party/
+
+# Cache & tool directories
+.vite/
+.pnpm-store/
+.pytest_cache/
+.playwright-mcp/
+
+# Runtime voices (user-generated, keep .gitkeep)
+resources/voices/*.wav
+resources/voices/*.mp3
+resources/voices/*.m4a
+resources/voices/*.flac
+resources/voices/*.webm
+!resources/voices/.gitkeep

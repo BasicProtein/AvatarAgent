@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, onBeforeUnmount } from 'vue'
 import { audioApi, type VoiceItem } from '../api/audio'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadFile, UploadRawFile } from 'element-plus'
 
 const voices = ref<VoiceItem[]>([])
@@ -62,6 +62,11 @@ onBeforeUnmount(() => {
   // 离开页面时清理录音资源
   stopRecordingCleanup()
   if (recordPreviewUrl.value) URL.revokeObjectURL(recordPreviewUrl.value)
+  // 清理音色预览音频
+  if (previewAudio.value) {
+    previewAudio.value.pause()
+    previewAudio.value = null
+  }
 })
 
 async function refreshVoices() {
@@ -219,6 +224,108 @@ async function handleTrain() {
     ElMessage.error(msg)
   } finally {
     trainingLoading.value = false
+  }
+}
+
+// ─── Voice library card actions ───
+
+/** 当前正在预览的音频 */
+const previewAudio = ref<HTMLAudioElement | null>(null)
+const playingVoiceName = ref('')
+
+async function handlePlayVoice(voice: VoiceItem, event: Event) {
+  event.stopPropagation()
+  // 如果正在播放同一个，则停止
+  if (playingVoiceName.value === voice.name && previewAudio.value) {
+    previewAudio.value.pause()
+    previewAudio.value = null
+    playingVoiceName.value = ''
+    return
+  }
+  // 停止之前的
+  if (previewAudio.value) {
+    previewAudio.value.pause()
+    previewAudio.value = null
+  }
+  try {
+    const res = await audioApi.previewVoice(voice.name)
+    const blob = res.data instanceof Blob
+      ? res.data
+      : new Blob([res.data], { type: 'audio/wav' })
+    const url = URL.createObjectURL(blob)
+    const audio = new Audio(url)
+    audio.onended = () => {
+      playingVoiceName.value = ''
+      URL.revokeObjectURL(url)
+      previewAudio.value = null
+    }
+    audio.onerror = () => {
+      playingVoiceName.value = ''
+      URL.revokeObjectURL(url)
+      previewAudio.value = null
+      ElMessage.error('音频解码失败')
+    }
+    await audio.play()
+    previewAudio.value = audio
+    playingVoiceName.value = voice.name
+  } catch (err) {
+    console.error('[PlayVoice]', err)
+    ElMessage.error('播放失败')
+  }
+}
+
+function handleStopPreview() {
+  if (previewAudio.value) {
+    previewAudio.value.pause()
+    previewAudio.value = null
+  }
+  playingVoiceName.value = ''
+}
+
+async function handleEditVoice(voice: VoiceItem, event: Event) {
+  event.stopPropagation()
+  try {
+    const { value: newName } = await ElMessageBox.prompt('请输入新名称', '重命名音色', {
+      inputValue: voice.name,
+      inputPattern: /^.{1,10}$/,
+      inputErrorMessage: '名称不能为空且不超过10个字符',
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+    })
+    if (newName && newName !== voice.name) {
+      await audioApi.renameVoice(voice.name, newName)
+      ElMessage.success(`已重命名为「${newName}」`)
+      const res = await audioApi.listVoices()
+      voices.value = res.data
+    }
+  } catch {
+    // 用户取消或请求失败，忽略
+  }
+}
+
+async function handleDeleteVoice(voice: VoiceItem, event: Event) {
+  event.stopPropagation()
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除音色「${voice.name}」吗？此操作不可撤销。`,
+      '删除确认',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        customClass: 'msgbox-danger',
+      },
+    )
+    await audioApi.deleteVoice(voice.name)
+    ElMessage.success(`音色「${voice.name}」已删除`)
+    const res = await audioApi.listVoices()
+    voices.value = res.data
+    // 如果删除的是当前选中的，重置选中
+    if (selectedVoiceIdx.value >= voices.value.length) {
+      selectedVoiceIdx.value = Math.max(0, voices.value.length - 1)
+    }
+  } catch {
+    // 用户取消或请求失败，忽略
   }
 }
 
@@ -517,9 +624,9 @@ async function handleSynthesize() {
             </div>
             <h4 class="vlc-name">{{ voice.name }}</h4>
             <div class="vlc-actions">
-              <el-button :icon="VideoPlay as any" circle size="small" />
-              <el-button :icon="Edit as any" circle size="small" />
-              <el-button :icon="Delete as any" circle size="small" type="danger" />
+              <el-button :icon="(playingVoiceName === voice.name ? VideoPause : VideoPlay) as any" circle size="small" @click="handlePlayVoice(voice, $event)" />
+              <el-button :icon="Edit as any" circle size="small" @click="handleEditVoice(voice, $event)" />
+              <el-button :icon="Delete as any" circle size="small" type="danger" @click="handleDeleteVoice(voice, $event)" />
             </div>
           </div>
           <p class="vlc-path">{{ voice.path }}</p>
@@ -534,12 +641,21 @@ async function handleSynthesize() {
         <p>暂无训练好的声音，请在上方训练区域上传音频并开始训练</p>
       </div>
     </div>
+
+    <!-- Floating playback indicator -->
+    <Transition name="playbar">
+      <div v-if="playingVoiceName" class="playback-pill" @click="handleStopPreview">
+        <div class="pill-bars">
+          <span v-for="i in 12" :key="i" class="pill-bar" :style="{ animationDelay: `${i * 0.07}s` }" />
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
 <script lang="ts">
-import { VideoPlay, Edit, Delete } from '@element-plus/icons-vue'
-export default { components: { VideoPlay, Edit, Delete } }
+import { VideoPlay, VideoPause, Edit, Delete } from '@element-plus/icons-vue'
+export default { components: { VideoPlay, VideoPause, Edit, Delete } }
 </script>
 
 <style scoped>
@@ -972,5 +1088,62 @@ export default { components: { VideoPlay, Edit, Delete } }
   padding: var(--space-10) 0;
   color: var(--color-text-tertiary);
   font-size: var(--text-sm);
+}
+
+/* ===== Floating Playback Pill ===== */
+.playback-pill {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #2C2926;
+  border-radius: 9999px;
+  padding: 8px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 1000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.playback-pill:hover {
+  background: #3A3632;
+}
+
+.pill-bars {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 18px;
+}
+
+.pill-bar {
+  width: 2.5px;
+  border-radius: 1.5px;
+  background: rgba(255, 255, 255, 0.85);
+  animation: pill-wave 0.8s ease-in-out infinite alternate;
+}
+
+@keyframes pill-wave {
+  0%   { height: 3px; }
+  100% { height: 14px; }
+}
+
+/* Transition */
+.playbar-enter-active,
+.playbar-leave-active {
+  transition: all 150ms ease;
+}
+
+.playbar-enter-from {
+  opacity: 0;
+  transform: translateX(-50%) translateY(12px);
+}
+
+.playbar-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(12px);
 }
 </style>
