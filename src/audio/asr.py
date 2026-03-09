@@ -17,6 +17,7 @@
   - 默认模型：turbo（OpenAI 最新，速度快且精度高，约 809MB）
 """
 
+import importlib.util
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +30,20 @@ logger = get_logger(__name__)
 # ── Whisper 全局模型缓存 ──
 # key: (model_size, device)，value: 已加载的 whisper.Model 实例
 _WHISPER_MODEL_CACHE: dict = {}
+
+
+def _validate_whisper_installation() -> None:
+    """校验当前环境中的 whisper 是否为 openai-whisper 提供的实现。"""
+    spec = importlib.util.find_spec("whisper")
+    if spec is None or not spec.origin:
+        raise ASRError("Whisper 未安装。请执行: uv add openai-whisper")
+
+    origin = spec.origin.replace("\\", "/").lower()
+    if origin.endswith("/whisper.py"):
+        raise ASRError(
+            "检测到错误的 `whisper` 包（当前是单文件模块，不是 openai-whisper）。"
+            "请先卸载错误包 `pip uninstall whisper`，再安装 `uv add openai-whisper`。"
+        )
 
 
 def _detect_device() -> str:
@@ -68,9 +83,10 @@ def get_local_asr_status() -> dict:
         "cuda_available": False,
     }
     try:
+        _validate_whisper_installation()
         import whisper  # noqa: F401
         status["whisper_installed"] = True
-    except ImportError:
+    except (ImportError, ASRError):
         pass
 
     try:
@@ -101,12 +117,15 @@ def _get_whisper_model(model_size: str, device: str):
     cache_key = (model_size, device)
     if cache_key not in _WHISPER_MODEL_CACHE:
         try:
+            _validate_whisper_installation()
             import whisper
         except ImportError:
             raise ASRError(
                 "Whisper 未安装。请执行: uv add openai-whisper\n"
                 "（首次安装会自动下载 torch CPU 版本，如需 GPU 加速请参考安装指南）"
             )
+        except ASRError:
+            raise
         # 读取自定义模型目录（由 ConfigManager 提供，没有则用 whisper 默认的 ~/.cache/whisper）
         _cfg = ConfigManager()
         model_dir = _cfg.get("whisper", "model_dir", "")

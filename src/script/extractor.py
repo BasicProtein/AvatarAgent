@@ -10,6 +10,7 @@
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -82,6 +83,8 @@ class ScriptExtractor:
     def __init__(self) -> None:
         self.config = ConfigManager()
         self._temp_dir = Path(tempfile.mkdtemp(prefix="avatar_extract_"))
+        self._douyin_share_html_cache: dict[str, str] = {}
+        self._text_fallback: Optional[str] = None
 
     # ──────────────────────────────── 公开方法 ────────────────────────────────
 
@@ -99,6 +102,7 @@ class ScriptExtractor:
         """
         try:
             logger.info(f"开始提取视频文案: {video_url}")
+            self._text_fallback = self._prepare_text_fallback(video_url)
 
             audio_path = self._download_audio(video_url)
             logger.info(f"音频下载完成: {audio_path}")
@@ -108,8 +112,14 @@ class ScriptExtractor:
             return text
 
         except ScriptExtractError:
+            if self._text_fallback:
+                logger.warning("音频转文案失败，回退使用分享页文案")
+                return self._text_fallback
             raise
         except Exception as e:
+            if self._text_fallback:
+                logger.warning(f"音频转文案异常，回退使用分享页文案: {e}")
+                return self._text_fallback
             raise ScriptExtractError(f"文案提取失败: {e}") from e
 
     def extract_from_audio(self, audio_path: str) -> str:
@@ -134,6 +144,16 @@ class ScriptExtractor:
             shutil.rmtree(self._temp_dir, ignore_errors=True)
             logger.info("已清理提取器临时文件")
 
+    def _prepare_text_fallback(self, url: str) -> Optional[str]:
+        """为可直接读取文案的平台准备兜底文本。"""
+        if not _is_douyin_url(url):
+            return None
+        try:
+            return self._extract_desc_from_share_item(self._get_douyin_share_item(url))
+        except Exception as e:
+            logger.warning(f"分享页文案兜底准备失败: {e}")
+            return None
+
     # ──────────────────────────── 私有：音频下载 ─────────────────────────────
 
     def _download_audio(self, url: str) -> str:
@@ -145,29 +165,178 @@ class ScriptExtractor:
         if _is_douyin_url(url):
             # 国内站点禁用代理，避免代理干扰
             with _no_proxy():
-                # 层 0：Playwright 浏览器渲染（最可靠，直接抓取视频流地址）
+                # 层 0：直接解析 iesdouyin 分享页内嵌数据（轻量、无 Cookie）
+                try:
+                    return self._download_via_douyin_share_page(url)
+                except Exception as e:
+                    logger.warning(f"[层0] 分享页解析失败: {e}")
+
+                # 层 1：Playwright 浏览器渲染（抓取视频流地址）
                 try:
                     return self._download_via_playwright(url)
                 except Exception as e:
-                    logger.warning(f"[层0] Playwright 失败: {e}")
+                    logger.warning(f"[层1] Playwright 失败: {e}")
 
-                # 层 1：douyin-tiktok-scraper 本地库
+                # 层 2：douyin-tiktok-scraper 本地库
                 try:
                     return self._download_via_scraper_lib(url)
                 except Exception as e:
-                    logger.warning(f"[层1] douyin-tiktok-scraper 失败: {e}")
+                    logger.warning(f"[层2] douyin-tiktok-scraper 失败: {e}")
 
-                # 层 2：api.douyin.wtf 公共 API（带重试）
+                # 层 3：api.douyin.wtf 公共 API（带重试）
                 try:
                     return self._download_via_douyin_api(url)
                 except Exception as e:
-                    logger.warning(f"[层2] api.douyin.wtf 失败: {e}，回退到 yt-dlp")
+                    logger.warning(f"[层3] api.douyin.wtf 失败: {e}，回退到 yt-dlp")
 
-                # 层 3：yt-dlp（兜底，支持所有平台）
+                # 层 4：yt-dlp（兜底，支持所有平台）
                 return self._download_via_ytdlp(url)
 
         # 非抖音平台，直接 yt-dlp
         return self._download_via_ytdlp(url)
+
+    def _download_via_douyin_share_page(self, url: str) -> str:
+        """直接解析抖音分享页 HTML 中的 videoInfoRes 并下载视频。
+
+        该链路不依赖 Playwright、第三方解析库或 yt-dlp cookie。
+        """
+        item = self._get_douyin_share_item(url)
+        video_id = item.get("aweme_id") or self._extract_douyin_video_id(url) or "unknown"
+        video_direct_url = self._pick_video_url((item.get("video") or {}))
+        logger.info(f"[层0] 分享页解析成功，video_id={video_id}")
+
+        raw_path = self._temp_dir / generate_unique_filename("mp4", "raw")
+        self._stream_download(video_direct_url, raw_path)
+
+        wav_path = self._temp_dir / generate_unique_filename("wav", "audio")
+        if self._ffmpeg_extract_audio(str(raw_path), str(wav_path)):
+            raw_path.unlink(missing_ok=True)
+            return str(wav_path)
+        return str(raw_path)
+
+    def _extract_url_from_share_html(self, html: str) -> str:
+        """从抖音分享页 HTML 中提取视频直链。"""
+        item = self._extract_share_item_from_html(html)
+        direct_url = self._pick_video_url((item.get("video") or {}))
+        if not direct_url:
+            raise ScriptExtractError("分享页数据中未找到可用视频地址")
+        return direct_url
+
+    def _get_douyin_share_item(self, url: str) -> dict:
+        """获取抖音分享页中的单条视频数据。"""
+        video_id = self._extract_douyin_video_id(url)
+        if not video_id:
+            raise ScriptExtractError("无法从链接中提取抖音视频 ID")
+
+        html = self._fetch_douyin_share_html(video_id)
+        return self._extract_share_item_from_html(html)
+
+    def _fetch_douyin_share_html(self, video_id: str) -> str:
+        """拉取抖音移动端分享页 HTML，并做进程内缓存。"""
+        cached = self._douyin_share_html_cache.get(video_id)
+        if cached:
+            return cached
+
+        share_url = f"https://www.iesdouyin.com/share/video/{video_id}/"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/16.6 Mobile/15E148 Safari/604.1"
+            ),
+            "Referer": "https://www.douyin.com/",
+        }
+
+        with httpx.Client(
+            timeout=_API_TIMEOUT,
+            follow_redirects=True,
+            trust_env=False,
+        ) as client:
+            resp = client.get(share_url, headers=headers)
+            resp.raise_for_status()
+            html = resp.text
+
+        self._douyin_share_html_cache[video_id] = html
+        return html
+
+    def _extract_share_item_from_html(self, html: str) -> dict:
+        """从抖音分享页 HTML 中提取 item_list[0]。"""
+        video_info = self._extract_embedded_json_object(html, '"videoInfoRes":')
+        item_list = video_info.get("item_list") or []
+        if not item_list:
+            raise ScriptExtractError("分享页数据中未找到 item_list")
+
+        return item_list[0] or {}
+
+    def _extract_desc_from_share_item(self, item: dict) -> Optional[str]:
+        """从分享页视频数据中提取可作为兜底的文案。"""
+        desc = (item.get("desc") or "").strip()
+        return desc or None
+
+    def _extract_embedded_json_object(self, text: str, marker: str) -> dict:
+        """从 HTML/JS 文本中按 marker 提取后续 JSON 对象。"""
+        marker_index = text.find(marker)
+        if marker_index == -1:
+            raise ScriptExtractError(f"页面中未找到标记: {marker}")
+
+        start = text.find("{", marker_index + len(marker))
+        if start == -1:
+            raise ScriptExtractError(f"标记后未找到 JSON 对象: {marker}")
+
+        depth = 0
+        in_string = False
+        escape = False
+
+        for index in range(start, len(text)):
+            ch = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:index + 1])
+                    except json.JSONDecodeError as e:
+                        raise ScriptExtractError(f"分享页 JSON 解析失败: {e}") from e
+
+        raise ScriptExtractError("分享页 JSON 对象不完整")
+
+    def _pick_video_url(self, video_data: dict) -> Optional[str]:
+        """从抖音视频数据中挑选一个可下载的视频地址。"""
+        addr_candidates = [
+            video_data.get("play_addr"),
+            video_data.get("play_api"),
+            video_data.get("download_addr"),
+        ]
+
+        bit_rates = video_data.get("bit_rate") or []
+        for bit_rate in bit_rates:
+            addr_candidates.extend([
+                bit_rate.get("play_addr"),
+                bit_rate.get("play_api"),
+                bit_rate.get("download_addr"),
+            ])
+
+        for addr in addr_candidates:
+            if not isinstance(addr, dict):
+                continue
+            url_list = addr.get("url_list") or []
+            for candidate in url_list:
+                if isinstance(candidate, str) and candidate.startswith("http"):
+                    return candidate.replace("\\u002F", "/")
+
+        return None
 
     # ──────────────── 层 0：Playwright 浏览器渲染（最可靠）─────────────────
 
@@ -205,7 +374,7 @@ class ScriptExtractor:
 
         # 短链需要先解析重定向获取真实 URL
         try:
-            with httpx.Client(follow_redirects=True, timeout=15) as client:
+            with httpx.Client(follow_redirects=True, timeout=15, trust_env=False) as client:
                 resp = client.get(url, headers={
                     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X)"
                 })
@@ -400,6 +569,7 @@ class ScriptExtractor:
                 with httpx.Client(
                     timeout=_API_TIMEOUT,
                     follow_redirects=True,
+                    trust_env=False,
                 ) as client:
                     resp = client.get(api_endpoint, params={"url": url, "minimal": "false"})
                     resp.raise_for_status()
@@ -447,7 +617,11 @@ class ScriptExtractor:
             "Referer": "https://www.douyin.com/",
         }
         try:
-            with httpx.Client(timeout=_DOWNLOAD_TIMEOUT, follow_redirects=True) as client:
+            with httpx.Client(
+                timeout=_DOWNLOAD_TIMEOUT,
+                follow_redirects=True,
+                trust_env=False,
+            ) as client:
                 with client.stream("GET", url, headers=headers) as resp:
                     resp.raise_for_status()
                     with open(dest, "wb") as f:
