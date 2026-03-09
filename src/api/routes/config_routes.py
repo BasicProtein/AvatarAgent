@@ -103,7 +103,8 @@ async def test_cloud_gpu():
 
 
 class WhisperConfig(BaseModel):
-    model_size: str
+    model_size: Optional[str] = None
+    device: Optional[str] = None
 
 
 @router.get("/local-asr")
@@ -112,17 +113,30 @@ async def get_local_asr():
 
     status = get_local_asr_status()
     status["model_size"] = config.get("whisper", "model_size", "turbo")
+    status["whisper_device"] = config.get_whisper_device()
     return status
 
 
 @router.post("/local-asr")
 async def set_whisper_config(req: WhisperConfig):
-    valid_sizes = {"tiny", "base", "small", "medium", "large", "turbo"}
-    if req.model_size not in valid_sizes:
-        return {"status": "error", "message": f"Unsupported model size: {req.model_size}"}
-    config.set("whisper", "model_size", req.model_size)
+    if req.model_size is not None:
+        valid_sizes = {"tiny", "base", "small", "medium", "large", "turbo"}
+        if req.model_size not in valid_sizes:
+            return {"status": "error", "message": f"Unsupported model size: {req.model_size}"}
+        config.set("whisper", "model_size", req.model_size)
+
+    if req.device is not None:
+        valid_devices = {"auto", "cuda", "cpu"}
+        if req.device not in valid_devices:
+            return {"status": "error", "message": f"device 必须是 auto、cuda 或 cpu"}
+        config.set("whisper", "device", req.device)
+
     config.reload()
-    return {"status": "success", "model_size": req.model_size}
+    return {
+        "status": "success",
+        "model_size": config.get("whisper", "model_size", "turbo"),
+        "device": config.get_whisper_device(),
+    }
 
 
 class CosyVoiceRuntimeConfig(BaseModel):

@@ -132,6 +132,13 @@ class ConfigManager:
         port = self.get("tuilionnx", "port", "8384")
         return f"http://{host}:{port}"
 
+    def get_whisper_device(self) -> str:
+        """获取 Whisper ASR 推理设备偏好: 'auto' / 'cuda' / 'cpu'"""
+        device = self.get("whisper", "device", "auto").strip().lower()
+        if device not in {"auto", "cuda", "cpu"}:
+            return "auto"
+        return device
+
     def get_ffmpeg_path(self) -> str:
         path = self.get("ffmpeg", "bin_path", "")
         return path if path else "ffmpeg"
