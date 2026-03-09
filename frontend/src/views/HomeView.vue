@@ -115,8 +115,7 @@ const pipeline = usePipelineStore()
 .home-view {
   display: flex;
   flex: 1;
-  height: 100%;
-  min-height: 0;
+  height: 100vh;
   overflow: hidden;
 }
 

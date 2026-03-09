@@ -24,8 +24,7 @@ onMounted(() => {
 <style scoped>
 .app-layout {
   display: flex;
-  min-height: 100vh;
-  height: 100dvh;
+  height: 100vh;
   overflow: hidden;
   background-color: var(--color-bg-page);
 }
@@ -34,6 +33,5 @@ onMounted(() => {
   flex: 1;
   overflow: hidden;
   display: flex;
-  min-height: 0;
 }
 </style>
