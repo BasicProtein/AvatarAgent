@@ -330,7 +330,16 @@ if __name__ == "__main__":
         sys.exit(0 if setup_cosyvoice() else 1)
     if args.action == "start":
         process = start_cosyvoice(port=args.port, device=args.device)
-        sys.exit(0 if process else 1)
+        if not process:
+            sys.exit(1)
+        try:
+            logger.info("CosyVoice 服务已启动，PID=%s，按 Ctrl+C 停止", process.pid)
+            process.wait()
+        except KeyboardInterrupt:
+            logger.info("正在停止 CosyVoice 服务...")
+            process.terminate()
+            process.wait(timeout=10)
+        sys.exit(0)
     if args.action == "check":
         sys.exit(0 if check_cosyvoice_health(port=args.port) else 1)
     if args.action == "status":

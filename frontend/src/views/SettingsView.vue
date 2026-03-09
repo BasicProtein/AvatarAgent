@@ -27,7 +27,9 @@ const cosyvoiceSaving = ref(false)
 const localAsr = ref<LocalAsrStatus | null>(null)
 const localAsrLoading = ref(false)
 const selectedModel = ref('turbo')
+const selectedDevice = ref<'auto' | 'cuda' | 'cpu'>('auto')
 const modelSaving = ref(false)
+const deviceSaving = ref(false)
 
 const WHISPER_MODELS = [
   { value: 'turbo',  label: 'turbo  （推荐）', size: '~809MB', desc: '速度快且精度高' },
@@ -85,6 +87,7 @@ async function refreshLocalAsr() {
     const res = await configApi.getLocalAsr()
     localAsr.value = res.data
     selectedModel.value = res.data.model_size || 'turbo'
+    selectedDevice.value = res.data.whisper_device || 'auto'
   } catch { /* 忽略 */ } finally {
     localAsrLoading.value = false
   }
@@ -99,6 +102,18 @@ async function saveWhisperModel() {
     ElMessage.error('保存失败')
   } finally {
     modelSaving.value = false
+  }
+}
+
+async function saveWhisperDevice() {
+  deviceSaving.value = true
+  try {
+    await configApi.setWhisperDevice(selectedDevice.value)
+    ElMessage.success(`ASR 推理设备已设为 ${selectedDevice.value === 'auto' ? '自动检测' : selectedDevice.value.toUpperCase()}`)
+  } catch {
+    ElMessage.error('保存失败')
+  } finally {
+    deviceSaving.value = false
   }
 }
 
@@ -257,6 +272,24 @@ async function testCloudGpu() {
         <p class="field-hint">当前在 CPU 模式运行（速度较慢）。如有 NVIDIA 显卡，可升级为 GPU 加速：</p>
         <code class="cmd">pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121</code>
         <p class="field-hint">安装后刷新此页面即可看到 GPU 信息。CUDA 12.1 版本适合大多数 RTX 显卡。</p>
+      </div>
+
+      <!-- 推理设备选择 -->
+      <div v-if="localAsr && localAsr.whisper_installed" class="setting-item" style="margin-bottom: var(--space-4);">
+        <div class="setting-info">
+          <h3>推理设备</h3>
+          <p>GPU 显存不足时（如其他服务占用），可手动切换为 CPU</p>
+        </div>
+        <div style="display: flex; align-items: center; gap: var(--space-3);">
+          <el-select v-model="selectedDevice" style="width: 200px;" size="large">
+            <el-option label="自动检测（默认）" value="auto" />
+            <el-option label="CUDA GPU" value="cuda" :disabled="!localAsr?.cuda_available" />
+            <el-option label="CPU" value="cpu" />
+          </el-select>
+          <el-button type="primary" :loading="deviceSaving" @click="saveWhisperDevice">
+            保存
+          </el-button>
+        </div>
       </div>
 
       <!-- 模型大小选择 -->

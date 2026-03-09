@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(echo:*)",
+      "Bash(curl:*)",
+      "Bash(python -c:*)",
+      "Bash(NO_PROXY='*' ALL_PROXY='' HTTP_PROXY='' HTTPS_PROXY='' python -c \":*)",
+      "Bash(python -m src.audio.cosyvoice_deploy:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(netstat:*)",
+      "Bash(tasklist:*)",
+      "Bash(wmic process:*)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
+    ]
+  }
+}

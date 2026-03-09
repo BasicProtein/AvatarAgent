@@ -13,6 +13,7 @@ export interface LocalAsrStatus {
     gpu_name: string | null
     cuda_available: boolean
     model_size: string
+    whisper_device: 'auto' | 'cuda' | 'cpu'
 }
 
 export interface CosyVoiceRuntimeStatus {
@@ -60,7 +61,10 @@ export const configApi = {
         client.get<LocalAsrStatus>('/api/config/local-asr'),
 
     setWhisperModel: (model_size: string) =>
-        client.post<{ status: string; model_size: string }>('/api/config/local-asr', { model_size }),
+        client.post<{ status: string; model_size: string; device: string }>('/api/config/local-asr', { model_size }),
+
+    setWhisperDevice: (device: 'auto' | 'cuda' | 'cpu') =>
+        client.post<{ status: string; model_size: string; device: string }>('/api/config/local-asr', { device }),
 
     getCosyVoiceRuntime: () =>
         client.get<CosyVoiceRuntimeStatus>('/api/config/cosyvoice-runtime'),
