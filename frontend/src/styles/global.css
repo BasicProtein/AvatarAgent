@@ -122,9 +122,15 @@ img {
 
 /* === Element Plus 覆盖 === */
 
-/* -- 按钮：统一 Claude 风格圆润药丸形 -- */
+/* -- 按钮：统一胶囊形圆角（与 badge 一致） -- */
 .el-button {
     border-radius: var(--radius-full) !important;
+    font-weight: var(--font-medium) !important;
+    transition: all var(--duration-fast) var(--ease-out) !important;
+}
+
+.el-button:active:not(:disabled) {
+    transform: scale(0.98);
 }
 
 .el-button--primary {

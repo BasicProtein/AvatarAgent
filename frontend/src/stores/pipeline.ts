@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 
-export type StepName = 'extract' | 'rewrite' | 'synthesize' | 'avatar' | 'postprod' | 'publish'
+export type StepName = 'extract' | 'rewrite' | 'compliance' | 'synthesize' | 'avatar' | 'postprod' | 'publish'
 
 export interface StepData {
     completed: boolean
@@ -15,6 +15,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
     const steps = ref<Record<StepName, StepData>>({
         extract: { completed: false, loading: false, result: null },
         rewrite: { completed: false, loading: false, result: null },
+        compliance: { completed: false, loading: false, result: null },
         synthesize: { completed: false, loading: false, result: null },
         avatar: { completed: false, loading: false, result: null },
         postprod: { completed: false, loading: false, result: null },
@@ -25,6 +26,8 @@ export const usePipelineStore = defineStore('pipeline', () => {
     const extractedText = ref('')
     // Rewritten script text
     const rewrittenText = ref('')
+    // Reviewed text (after compliance check)
+    const reviewedText = ref('')
     // Generated description
     const description = ref('')
     // Synthesized audio path
@@ -64,6 +67,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
         }
         extractedText.value = ''
         rewrittenText.value = ''
+        reviewedText.value = ''
         description.value = ''
         audioPath.value = ''
         avatarVideoPath.value = ''
@@ -77,6 +81,7 @@ export const usePipelineStore = defineStore('pipeline', () => {
         steps,
         extractedText,
         rewrittenText,
+        reviewedText,
         description,
         audioPath,
         avatarVideoPath,

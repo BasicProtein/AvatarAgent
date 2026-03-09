@@ -209,11 +209,13 @@ class ASREngine:
             use_fp16 = self._device in ("cuda", "mps")
 
             model = _get_whisper_model(self.model_size, self._device)
-            result = model.transcribe(
-                audio_path,
+            transcribe_opts = dict(
                 language=language,
                 fp16=use_fp16,
             )
+            if language == "zh":
+                transcribe_opts["initial_prompt"] = "以下是普通话的句子，使用简体中文输出。"
+            result = model.transcribe(audio_path, **transcribe_opts)
 
             segments = []
             for seg in result.get("segments", []):
@@ -251,14 +253,17 @@ class ASREngine:
                 with open(audio_path, "rb") as f:
                     files = {"file": (Path(audio_path).name, f, "audio/wav")}
                     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+                    form_data = {
+                        "language": language,
+                        "model": self.model_size,
+                        "timestamps": "true",
+                    }
+                    if language == "zh":
+                        form_data["initial_prompt"] = "以下是普通话的句子，使用简体中文输出。"
                     response = await client.post(
                         f"{api_url}/asr/transcribe/timestamps",
                         files=files,
-                        data={
-                            "language": language,
-                            "model": self.model_size,
-                            "timestamps": "true",
-                        },
+                        data=form_data,
                         headers=headers,
                     )
                     response.raise_for_status()
@@ -287,11 +292,14 @@ class ASREngine:
             use_fp16 = self._device in ("cuda", "mps")  # CPU 不支持 fp16
 
             model = _get_whisper_model(self.model_size, self._device)
-            result = model.transcribe(
-                audio_path,
+            # initial_prompt 引导 Whisper 输出简体中文（防止默认输出繁体）
+            transcribe_opts = dict(
                 language=language,
                 fp16=use_fp16,
             )
+            if language == "zh":
+                transcribe_opts["initial_prompt"] = "以下是普通话的句子，使用简体中文输出。"
+            result = model.transcribe(audio_path, **transcribe_opts)
             text = result["text"].strip()
             logger.info(
                 f"本地转录完成，设备: {self._device}，"
@@ -328,10 +336,13 @@ class ASREngine:
                 with open(audio_path, "rb") as f:
                     files = {"file": (Path(audio_path).name, f, "audio/wav")}
                     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+                    form_data = {"language": language, "model": self.model_size}
+                    if language == "zh":
+                        form_data["initial_prompt"] = "以下是普通话的句子，使用简体中文输出。"
                     response = await client.post(
                         f"{api_url}/asr/transcribe",
                         files=files,
-                        data={"language": language, "model": self.model_size},
+                        data=form_data,
                         headers=headers,
                     )
                     response.raise_for_status()

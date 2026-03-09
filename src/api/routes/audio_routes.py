@@ -43,6 +43,7 @@ async def synthesize_path(req: SynthesizeRequest):
     try:
         audio_path = await tts_engine.synthesize(req.text, req.voice_id, req.speed)
     except TTSError as e:
+        logger.warning("Synthesize path failed: %s", e)
         raise HTTPException(status_code=503, detail=str(e))
 
     output_dir = config.get_output_dir()
@@ -77,6 +78,7 @@ async def synthesize_blob(req: SynthesizeRequest):
     try:
         audio_path = await tts_engine.synthesize(req.text, req.voice_id, req.speed)
     except TTSError as e:
+        logger.warning("Synthesize blob failed: %s", e)
         raise HTTPException(status_code=503, detail=str(e))
     return FileResponse(audio_path, media_type="audio/wav", filename="synthesized.wav")
 

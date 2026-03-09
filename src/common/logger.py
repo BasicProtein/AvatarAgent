@@ -33,11 +33,15 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
         # 文件输出
         log_dir = Path(__file__).parent.parent.parent / "logs"
         log_dir.mkdir(exist_ok=True)
-        file_handler = logging.FileHandler(
-            log_dir / "avatar_agent.log", encoding="utf-8"
-        )
-        file_handler.setLevel(level)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        try:
+            file_handler = logging.FileHandler(
+                log_dir / "avatar_agent.log", encoding="utf-8"
+            )
+        except OSError:
+            file_handler = None
+        if file_handler is not None:
+            file_handler.setLevel(level)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
 
     return logger

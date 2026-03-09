@@ -3,7 +3,6 @@ import { usePipelineStore } from '../stores/pipeline'
 import StepCard from '../components/editor/StepCard.vue'
 import ScriptExtractStep from '../components/editor/ScriptExtractStep.vue'
 import ScriptRewriteStep from '../components/editor/ScriptRewriteStep.vue'
-import ComplianceCheckStep from '../components/editor/ComplianceCheckStep.vue'
 import AudioSynthesizeStep from '../components/editor/AudioSynthesizeStep.vue'
 import AvatarGenerateStep from '../components/editor/AvatarGenerateStep.vue'
 import VideoPostStep from '../components/editor/VideoPostStep.vue'
@@ -19,7 +18,7 @@ const pipeline = usePipelineStore()
     <div class="editor-panel">
       <div class="editor-header">
         <h2 class="editor-title">视频创作工作流</h2>
-        <span class="step-progress">{{ pipeline.completedCount }}/7 步完成</span>
+        <span class="step-progress">{{ pipeline.completedCount }}/6 步完成</span>
       </div>
 
       <div class="editor-scroll">
@@ -48,17 +47,6 @@ const pipeline = usePipelineStore()
 
           <StepCard
             :step-number="3"
-            title="法务审查"
-            :completed="pipeline.steps.compliance.completed"
-            :loading="pipeline.steps.compliance.loading"
-            :active="pipeline.activeStep === 'compliance'"
-            @toggle="pipeline.setActiveStep('compliance')"
-          >
-            <ComplianceCheckStep />
-          </StepCard>
-
-          <StepCard
-            :step-number="4"
             title="语音合成"
             :completed="pipeline.steps.synthesize.completed"
             :loading="pipeline.steps.synthesize.loading"
@@ -69,7 +57,7 @@ const pipeline = usePipelineStore()
           </StepCard>
 
           <StepCard
-            :step-number="5"
+            :step-number="4"
             title="数字人生成"
             :completed="pipeline.steps.avatar.completed"
             :loading="pipeline.steps.avatar.loading"
@@ -80,7 +68,7 @@ const pipeline = usePipelineStore()
           </StepCard>
 
           <StepCard
-            :step-number="6"
+            :step-number="5"
             title="视频后期"
             :completed="pipeline.steps.postprod.completed"
             :loading="pipeline.steps.postprod.loading"
@@ -91,7 +79,7 @@ const pipeline = usePipelineStore()
           </StepCard>
 
           <StepCard
-            :step-number="7"
+            :step-number="6"
             title="发布"
             :completed="pipeline.steps.publish.completed"
             :loading="pipeline.steps.publish.loading"
@@ -115,8 +103,7 @@ const pipeline = usePipelineStore()
 .home-view {
   display: flex;
   flex: 1;
-  height: 100%;
-  min-height: 0;
+  height: 100vh;
   overflow: hidden;
 }
 

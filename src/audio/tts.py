@@ -1,27 +1,19 @@
-"""语音合成模块 (TTS)
+"""Text-to-speech integration for CosyVoice."""
 
-基于 CosyVoice 实现语音合成和声音克隆。
-通过 HTTP API 对接 CosyVoice 官方 FastAPI 服务。
-
-支持的 CosyVoice API 端点：
-- /inference_cross_lingual  跨语言声音克隆（仅需参考音频）
-- /inference_zero_shot      零样本声音克隆（需参考音频 + prompt 文本）
-- /inference_sft            预置音色合成
-
-官方仓库: https://github.com/FunAudioLLM/CosyVoice
-"""
+from __future__ import annotations
 
 import io
+import re
 import subprocess
 import wave
 from pathlib import Path
 
 import httpx
 
-from src.common.logger import get_logger
 from src.common.config_manager import ConfigManager
 from src.common.exceptions import TTSError
 from src.common.file_utils import ensure_dir, generate_unique_filename
+from src.common.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -29,10 +21,15 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 VOICES_DIR = PROJECT_ROOT / "resources" / "voices"
 
 DEFAULT_SAMPLE_RATE = 22050
+DEFAULT_CHUNK_CHARS = 80
+DEFAULT_REQUEST_TIMEOUT = 120.0
+DEFAULT_RETRIES = 2
+
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[\u3002\uff01\uff1f!?.;\n])")
+PHRASE_SPLIT_RE = re.compile(r"(?<=[\uFF0C,\u3001\uFF1A:\s])")
 
 
 def _is_wav(data: bytes) -> bool:
-    """检查数据是否已经是 WAV 格式（以 RIFF 头开头）"""
     return len(data) > 4 and data[:4] == b"RIFF"
 
 
@@ -42,55 +39,63 @@ def _pcm_to_wav(
     channels: int = 1,
     sample_width: int = 2,
 ) -> bytes:
-    """将原始 PCM int16 数据封装为 WAV 格式
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
+    return buffer.getvalue()
 
-    CosyVoice 官方 API 通过 StreamingResponse 返回原始 int16 PCM 字节流，
-    需要添加 WAV 头才能被播放器和 ffmpeg 正确识别。
-    """
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(sample_width)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm_data)
-    return buf.getvalue()
+
+def _ensure_wav_bytes(data: bytes, sample_rate: int) -> bytes:
+    if _is_wav(data):
+        return data
+    return _pcm_to_wav(data, sample_rate=sample_rate)
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
 class TTSEngine:
-    """CosyVoice 语音合成引擎
-
-    通过 HTTP 请求对接 CosyVoice 官方 FastAPI 服务，支持：
-    - 音色列表管理（本地 resources/voices/ 目录）
-    - 基于参考音频的跨语言声音克隆（inference_cross_lingual）
-    - 基于参考音频 + prompt 文本的零样本克隆（inference_zero_shot）
-    - 语速调节（通过 ffmpeg atempo 滤镜后处理）
-    """
-
     def __init__(self) -> None:
         self.config = ConfigManager()
-        self.base_url = self.config.get_cosyvoice_url()
+        self.base_url = self.config.get_cosyvoice_url().rstrip("/")
         self.sample_rate = self.config.get_int(
-            "cosyvoice", "sample_rate", DEFAULT_SAMPLE_RATE
+            "cosyvoice",
+            "sample_rate",
+            DEFAULT_SAMPLE_RATE,
+        )
+        self.chunk_chars = self.config.get_int(
+            "cosyvoice",
+            "chunk_chars",
+            DEFAULT_CHUNK_CHARS,
+        )
+        self.request_timeout = self.config.get_float(
+            "cosyvoice",
+            "request_timeout",
+            DEFAULT_REQUEST_TIMEOUT,
         )
         ensure_dir(VOICES_DIR)
 
     def list_voices(self) -> list[dict]:
-        """获取可用音色列表
-
-        Returns:
-            音色列表，每项包含 {"name": "音色名", "path": "文件路径"}
-        """
-        voices = []
+        voices: list[dict] = []
         if VOICES_DIR.exists():
-            for f in sorted(VOICES_DIR.iterdir()):
-                if f.suffix.lower() in (
-                    ".pt", ".pth", ".wav", ".mp3", ".m4a",
-                    ".ogg", ".flac", ".aac", ".webm",
-                ):
-                    voices.append({"name": f.stem, "path": str(f)})
+            for file_path in sorted(VOICES_DIR.iterdir()):
+                if file_path.suffix.lower() in {
+                    ".pt",
+                    ".pth",
+                    ".wav",
+                    ".mp3",
+                    ".m4a",
+                    ".ogg",
+                    ".flac",
+                    ".aac",
+                    ".webm",
+                }:
+                    voices.append({"name": file_path.stem, "path": str(file_path)})
         return voices
-
-    # ──────────────────────── 合成接口 ────────────────────────
 
     async def synthesize(
         self,
@@ -98,43 +103,31 @@ class TTSEngine:
         voice_id: int = 0,
         speed: float = 1.0,
     ) -> str:
-        """使用预置音色合成语音
-
-        将 resources/voices/ 中选定的音色文件作为参考音频，
-        调用 CosyVoice inference_cross_lingual 实现声音克隆合成。
-
-        Args:
-            text: 待合成文本
-            voice_id: 音色索引（对应 list_voices 的顺序）
-            speed: 语速倍率 (0.5-2.0)
-
-        Returns:
-            生成的音频文件路径
-
-        Raises:
-            TTSError: 合成失败
-        """
         voices = self.list_voices()
         if not voices:
-            raise TTSError("没有可用的音色文件，请在 resources/voices/ 目录放置音色文件")
+            raise TTSError("No voice samples found under resources/voices.")
 
         if voice_id < 0 or voice_id >= len(voices):
-            raise TTSError(f"无效的音色索引: {voice_id}，可用范围: 0-{len(voices)-1}")
+            raise TTSError(f"Invalid voice_id: {voice_id}.")
 
         voice = voices[voice_id]
-        logger.info(f"使用音色 '{voice['name']}' 合成语音，语速: {speed}")
+        logger.info(
+            "Synthesizing speech with voice '%s', speed=%s",
+            voice["name"],
+            speed,
+        )
 
         output_dir = self.config.get_output_dir() / "audio"
         ensure_dir(output_dir)
         output_path = str(output_dir / generate_unique_filename("wav", "tts"))
 
-        audio_data = await self._inference_cross_lingual(text, voice["path"])
+        audio_data = await self._synthesize_with_chunks(text, voice["path"])
         self._save_audio(audio_data, output_path)
 
         if abs(speed - 1.0) > 0.05:
             output_path = self._adjust_speed(output_path, speed)
 
-        logger.info(f"语音合成完成: {output_path}")
+        logger.info("Speech synthesis finished: %s", output_path)
         return output_path
 
     async def clone_voice(
@@ -143,122 +136,217 @@ class TTSEngine:
         text: str,
         speed: float = 1.0,
     ) -> str:
-        """基于参考音频克隆声音并合成
-
-        Args:
-            reference_audio: 参考音频文件路径
-            text: 待合成文本
-            speed: 语速倍率
-
-        Returns:
-            生成的音频文件路径
-
-        Raises:
-            TTSError: 克隆/合成失败
-        """
-        if not Path(reference_audio).exists():
-            raise TTSError(f"参考音频文件不存在: {reference_audio}")
+        reference_path = Path(reference_audio)
+        if not reference_path.exists():
+            raise TTSError(f"Reference audio not found: {reference_audio}")
 
         output_dir = self.config.get_output_dir() / "audio"
         ensure_dir(output_dir)
         output_path = str(output_dir / generate_unique_filename("wav", "clone"))
 
-        audio_data = await self._inference_cross_lingual(text, reference_audio)
+        audio_data = await self._synthesize_with_chunks(text, str(reference_path))
         self._save_audio(audio_data, output_path)
 
         if abs(speed - 1.0) > 0.05:
             output_path = self._adjust_speed(output_path, speed)
 
-        logger.info(f"声音克隆合成完成: {output_path}")
+        logger.info("Voice clone synthesis finished: %s", output_path)
         return output_path
 
-    # ──────────────────────── CosyVoice API 调用 ────────────────────────
+    async def _synthesize_with_chunks(self, text: str, prompt_wav_path: str) -> bytes:
+        chunks = self._chunk_text(text)
+        if not chunks:
+            raise TTSError("Text is empty. Nothing to synthesize.")
+
+        wav_chunks: list[bytes] = []
+        total = len(chunks)
+
+        for index, chunk in enumerate(chunks, start=1):
+            logger.info(
+                "Submitting TTS chunk %s/%s (chars=%s)",
+                index,
+                total,
+                len(chunk),
+            )
+            raw_audio = await self._inference_cross_lingual(chunk, prompt_wav_path)
+            wav_chunks.append(_ensure_wav_bytes(raw_audio, self.sample_rate))
+
+        if not wav_chunks:
+            raise TTSError("CosyVoice returned no audio chunks.")
+
+        return self._merge_wav_chunks(wav_chunks)
+
+    def _chunk_text(self, text: str) -> list[str]:
+        normalized = _normalize_text(text)
+        if not normalized:
+            return []
+
+        max_chars = max(20, self.chunk_chars)
+        sentence_parts = [
+            part.strip()
+            for part in SENTENCE_SPLIT_RE.split(normalized)
+            if part.strip()
+        ]
+        if not sentence_parts:
+            sentence_parts = [normalized]
+
+        chunks: list[str] = []
+        current = ""
+
+        for sentence in sentence_parts:
+            if len(sentence) > max_chars:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                chunks.extend(self._split_long_sentence(sentence, max_chars))
+                continue
+
+            candidate = sentence if not current else f"{current} {sentence}"
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                chunks.append(current)
+                current = sentence
+
+        if current:
+            chunks.append(current)
+
+        return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+    def _split_long_sentence(self, sentence: str, max_chars: int) -> list[str]:
+        phrase_parts = [
+            part.strip()
+            for part in PHRASE_SPLIT_RE.split(sentence)
+            if part.strip()
+        ]
+        if len(phrase_parts) <= 1:
+            return [
+                sentence[index:index + max_chars].strip()
+                for index in range(0, len(sentence), max_chars)
+                if sentence[index:index + max_chars].strip()
+            ]
+
+        chunks: list[str] = []
+        current = ""
+        for part in phrase_parts:
+            candidate = part if not current else f"{current} {part}"
+            if len(candidate) <= max_chars:
+                current = candidate
+                continue
+
+            if current:
+                chunks.append(current)
+
+            if len(part) <= max_chars:
+                current = part
+                continue
+
+            chunks.extend(
+                [
+                    part[index:index + max_chars].strip()
+                    for index in range(0, len(part), max_chars)
+                    if part[index:index + max_chars].strip()
+                ]
+            )
+            current = ""
+
+        if current:
+            chunks.append(current)
+        return chunks
 
     async def _inference_cross_lingual(
-        self, tts_text: str, prompt_wav_path: str
+        self,
+        tts_text: str,
+        prompt_wav_path: str,
     ) -> bytes:
-        """调用 CosyVoice /inference_cross_lingual 接口
+        prompt_path = Path(prompt_wav_path)
+        if not prompt_path.exists():
+            raise TTSError(f"Voice sample not found: {prompt_wav_path}")
 
-        跨语言声音克隆：仅需参考音频即可克隆音色并合成目标文本，
-        无需提供参考音频对应的 prompt 文本。
+        timeout = httpx.Timeout(self.request_timeout, connect=5.0)
+        last_error: Exception | None = None
 
-        官方 API 签名:
-            POST /inference_cross_lingual
-            Form: tts_text (str), prompt_wav (UploadFile)
-            Response: StreamingResponse (raw int16 PCM bytes)
-
-        Args:
-            tts_text: 待合成文本
-            prompt_wav_path: 参考音频文件路径
-
-        Returns:
-            音频数据字节（可能是 WAV 或原始 PCM，取决于 CosyVoice 部署方式）
-        """
-        try:
-            async with httpx.AsyncClient(
-                    timeout=180.0,
-                    transport=httpx.AsyncHTTPTransport(),
+        for attempt in range(1, DEFAULT_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=timeout,
+                    follow_redirects=True,
+                    trust_env=False,
+                    transport=httpx.AsyncHTTPTransport(retries=0),
                 ) as client:
-                with open(prompt_wav_path, "rb") as f:
-                    files = {
-                        "prompt_wav": (Path(prompt_wav_path).name, f, "audio/wav"),
-                    }
-                    data = {"tts_text": tts_text}
+                    with prompt_path.open("rb") as prompt_file:
+                        response = await client.post(
+                            f"{self.base_url}/inference_cross_lingual",
+                            files={
+                                "prompt_wav": (
+                                    prompt_path.name,
+                                    prompt_file,
+                                    "audio/wav",
+                                )
+                            },
+                            data={"tts_text": tts_text},
+                        )
 
-                    response = await client.post(
-                        f"{self.base_url}/inference_cross_lingual",
-                        files=files,
-                        data=data,
-                    )
-                    response.raise_for_status()
+                response.raise_for_status()
+                audio_data = response.content
+                if not audio_data:
+                    raise TTSError("CosyVoice returned an empty audio payload.")
+                return audio_data
+            except TTSError as exc:
+                last_error = exc
+                logger.warning(
+                    "CosyVoice returned empty audio on attempt %s/%s for text length %s",
+                    attempt,
+                    DEFAULT_RETRIES,
+                    len(tts_text),
+                )
+            except httpx.ConnectError as exc:
+                raise TTSError(
+                    f"Cannot reach CosyVoice service at {self.base_url}. "
+                    "Please confirm the service is started."
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                detail = exc.response.text[:200]
+                raise TTSError(
+                    f"CosyVoice returned HTTP {exc.response.status_code}: {detail}"
+                ) from exc
+            except httpx.RequestError as exc:
+                last_error = TTSError(f"CosyVoice request failed: {exc}")
+                logger.warning(
+                    "CosyVoice request failed on attempt %s/%s: %s",
+                    attempt,
+                    DEFAULT_RETRIES,
+                    exc,
+                )
 
-                    if len(response.content) == 0:
-                        raise TTSError("CosyVoice 返回了空音频数据")
+        raise TTSError(str(last_error) if last_error else "CosyVoice request failed.")
 
-                    return response.content
+    def _merge_wav_chunks(self, wav_chunks: list[bytes]) -> bytes:
+        output = io.BytesIO()
+        channels: int | None = None
+        sample_width: int | None = None
+        sample_rate: int | None = None
 
-        except httpx.ConnectError:
-            raise TTSError(
-                f"无法连接 CosyVoice 服务 ({self.base_url})，"
-                "请确认服务已启动。可在「设置」页查看服务状态。"
-            )
-        except httpx.RequestError as e:
-            raise TTSError(f"CosyVoice 服务请求失败: {e}") from e
-        except httpx.HTTPStatusError as e:
-            raise TTSError(
-                f"CosyVoice 服务返回错误 {e.response.status_code}: "
-                f"{e.response.text[:200]}"
-            ) from e
+        with wave.open(output, "wb") as merged:
+            for wav_chunk in wav_chunks:
+                with wave.open(io.BytesIO(wav_chunk), "rb") as chunk:
+                    if channels is None:
+                        channels = chunk.getnchannels()
+                        sample_width = chunk.getsampwidth()
+                        sample_rate = chunk.getframerate()
+                        merged.setnchannels(channels)
+                        merged.setsampwidth(sample_width)
+                        merged.setframerate(sample_rate)
+                    merged.writeframes(chunk.readframes(chunk.getnframes()))
 
-    # ──────────────────────── 音频保存与后处理 ────────────────────────
+        return output.getvalue()
 
     def _save_audio(self, audio_data: bytes, output_path: str) -> None:
-        """保存音频数据到文件
-
-        自动检测数据格式：如果已是 WAV（部分第三方 CosyVoice 封装会直接返回 WAV），
-        则原样保存；否则当作原始 PCM int16 数据，封装为 WAV 格式。
-        """
-        if _is_wav(audio_data):
-            with open(output_path, "wb") as f:
-                f.write(audio_data)
-        else:
-            wav_data = _pcm_to_wav(audio_data, self.sample_rate)
-            with open(output_path, "wb") as f:
-                f.write(wav_data)
+        wav_data = _ensure_wav_bytes(audio_data, self.sample_rate)
+        with open(output_path, "wb") as output_file:
+            output_file.write(wav_data)
 
     def _adjust_speed(self, audio_path: str, speed: float) -> str:
-        """通过 ffmpeg atempo 滤镜调节音频语速
-
-        CosyVoice 官方 API 不支持语速参数，因此通过后处理实现。
-        atempo 滤镜接受 0.5-100.0 范围，此处限制为 0.5-2.0。
-
-        Args:
-            audio_path: 输入音频路径
-            speed: 语速倍率 (0.5-2.0)
-
-        Returns:
-            处理后的音频路径（失败时返回原路径）
-        """
         adjusted_path = audio_path.replace(".wav", "_spd.wav")
         ffmpeg = self.config.get_ffmpeg_path()
         atempo = max(0.5, min(2.0, speed))
@@ -266,10 +354,15 @@ class TTSEngine:
         try:
             result = subprocess.run(
                 [
-                    ffmpeg, "-i", audio_path,
-                    "-filter:a", f"atempo={atempo}",
-                    "-acodec", "pcm_s16le",
-                    "-y", adjusted_path,
+                    ffmpeg,
+                    "-i",
+                    audio_path,
+                    "-filter:a",
+                    f"atempo={atempo}",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-y",
+                    adjusted_path,
                 ],
                 capture_output=True,
                 text=True,
@@ -278,34 +371,25 @@ class TTSEngine:
             if result.returncode == 0:
                 Path(audio_path).unlink(missing_ok=True)
                 return adjusted_path
-            logger.warning(f"ffmpeg 调速失败: {result.stderr[:200]}")
+            logger.warning("ffmpeg speed adjust failed: %s", result.stderr[:200])
         except FileNotFoundError:
-            logger.warning("ffmpeg 未找到，跳过语速调节")
+            logger.warning("ffmpeg not found, skipping speed adjustment.")
         except subprocess.TimeoutExpired:
-            logger.warning("ffmpeg 调速超时")
-        except Exception as e:
-            logger.warning(f"语速调节异常: {e}")
+            logger.warning("ffmpeg speed adjustment timed out.")
+        except Exception as exc:
+            logger.warning("Speed adjustment failed: %s", exc)
 
         return audio_path
 
-    # ──────────────────────── 服务健康检查 ────────────────────────
-
     async def check_service(self) -> bool:
-        """检查 CosyVoice 服务是否可用
-
-        CosyVoice 官方 FastAPI 服务没有专门的 /health 端点，
-        通过访问 FastAPI 自动生成的 /docs 页面来判断服务是否在线。
-
-        Returns:
-            服务是否在线
-        """
         try:
             async with httpx.AsyncClient(
                 timeout=5.0,
                 follow_redirects=True,
-                transport=httpx.AsyncHTTPTransport(),
+                trust_env=False,
+                transport=httpx.AsyncHTTPTransport(retries=0),
             ) as client:
                 response = await client.get(f"{self.base_url}/docs")
-                return response.status_code == 200
+            return response.status_code == 200
         except Exception:
             return False

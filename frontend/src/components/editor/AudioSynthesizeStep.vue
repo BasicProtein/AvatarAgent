@@ -18,7 +18,7 @@ onMounted(async () => {
 })
 
 async function handleSynthesize() {
-  const text = pipeline.rewrittenText || pipeline.extractedText
+  const text = pipeline.reviewedText || pipeline.rewrittenText || pipeline.extractedText
   if (!text) {
     ElMessage.warning('请先完成文案步骤')
     return
@@ -42,7 +42,12 @@ async function handleSynthesize() {
     pipeline.setActiveStep('avatar')
     ElMessage.success('语音合成成功')
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : '语音合成失败'
+    const msg =
+      typeof e === 'object' && e !== null && 'response' in e
+        ? (e as { response?: { data?: { detail?: string } } }).response?.data?.detail || (e as Error).message
+        : e instanceof Error
+          ? e.message
+          : '语音合成失败'
     ElMessage.error(msg)
   } finally {
     pipeline.setStepLoading('synthesize', false)

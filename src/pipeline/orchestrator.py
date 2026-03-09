@@ -1,7 +1,7 @@
 """全流程编排器
 
 一键执行完整的视频生产流水线：
-文案提取 → 仿写 → 语音合成 → 数字人 → 字幕 → BGM → 封面 → 发布
+文案提取 → 仿写 → 法务审查 → 语音合成 → 数字人 → 字幕 → BGM → 封面 → 发布
 """
 
 from typing import Optional
@@ -66,28 +66,45 @@ class PipelineOrchestrator:
 
         try:
             # ========== Step 1: 提取文案 ==========
-            logger.info("Step 1/8: 提取对标文案")
+            logger.info("Step 1/9: 提取对标文案")
             from src.script.extractor import ScriptExtractor
             extractor = ScriptExtractor()
             original_text = extractor.extract_from_url(video_url)
             result["steps"]["extract"] = {"status": "done", "text": original_text}
 
             # ========== Step 2: 文案仿写 ==========
-            logger.info("Step 2/8: AI 文案仿写")
+            logger.info("Step 2/9: AI 文案仿写")
             from src.script.rewriter import ScriptRewriter
             rewriter = ScriptRewriter()
             rewritten_text = await rewriter.rewrite_auto(original_text, api_key)
             result["steps"]["rewrite"] = {"status": "done", "text": rewritten_text}
 
-            # ========== Step 3: 语音合成 ==========
-            logger.info("Step 3/8: 语音合成")
+            # ========== Step 3: 法务合规审查 ==========
+            logger.info("Step 3/9: AI 法务审查")
+            from src.script.compliance import ComplianceChecker
+            checker = ComplianceChecker()
+            compliance_result = await checker.review(rewritten_text, api_key)
+            if not compliance_result["passed"]:
+                logger.warning(
+                    f"法务审查发现 {len(compliance_result['prohibited_words'])} 个违禁词, "
+                    f"{len(compliance_result['ai_suggestions'])} 个不合规表达，已自动修正"
+                )
+                rewritten_text = compliance_result["revised_text"]
+            result["steps"]["compliance"] = {
+                "status": "done",
+                "passed": compliance_result["passed"],
+                "issues_count": len(compliance_result["prohibited_words"]) + len(compliance_result["ai_suggestions"]),
+            }
+
+            # ========== Step 4: 语音合成 ==========
+            logger.info("Step 4/9: 语音合成")
             from src.audio.tts import TTSEngine
             tts = TTSEngine()
             audio_path = await tts.synthesize(rewritten_text, voice_id, speed)
             result["steps"]["tts"] = {"status": "done", "audio_path": audio_path}
 
             # ========== Step 4: 数字人视频生成 ==========
-            logger.info("Step 4/8: 数字人视频生成")
+            logger.info("Step 5/9: 数字人视频生成")
             if avatar_engine == "heygem":
                 from src.avatar.heygem import HeyGemEngine
                 engine = HeyGemEngine()
@@ -102,7 +119,7 @@ class PipelineOrchestrator:
             result["steps"]["avatar"] = {"status": "done", "video_path": video_path}
 
             # ========== Step 5: 字幕生成与添加 ==========
-            logger.info("Step 5/8: 生成字幕")
+            logger.info("Step 6/9: 生成字幕")
             from src.video.subtitle import SubtitleGenerator
             subtitle_gen = SubtitleGenerator()
             srt_path = await subtitle_gen.generate_srt(audio_path, rewritten_text, api_key)
@@ -114,19 +131,19 @@ class PipelineOrchestrator:
 
             # ========== Step 6: 背景音乐 ==========
             if not skip_bgm:
-                logger.info("Step 6/8: 添加背景音乐")
+                logger.info("Step 7/9: 添加背景音乐")
                 from src.video.bgm import BGMManager
                 bgm_mgr = BGMManager()
                 video_path = await bgm_mgr.add_random_bgm(video_path, bgm_volume)
                 result["steps"]["bgm"] = {"status": "done", "video_path": video_path}
             else:
-                logger.info("Step 6/8: 跳过 BGM")
+                logger.info("Step 7/9: 跳过 BGM")
                 result["steps"]["bgm"] = {"status": "skipped"}
 
             # ========== Step 7: 封面生成 ==========
             cover_path = ""
             if create_cover:
-                logger.info("Step 7/8: 生成封面")
+                logger.info("Step 8/9: 生成封面")
                 from src.video.cover import CoverGenerator
                 cover_gen = CoverGenerator()
                 cover_cfg = cover_config or {}
@@ -135,12 +152,12 @@ class PipelineOrchestrator:
                 )
                 result["steps"]["cover"] = {"status": "done", "cover_path": cover_path}
             else:
-                logger.info("Step 7/8: 跳过封面")
+                logger.info("Step 8/9: 跳过封面")
                 result["steps"]["cover"] = {"status": "skipped"}
 
             # ========== Step 8: 多平台发布 ==========
             if publish_platforms:
-                logger.info(f"Step 8/8: 发布到 {publish_platforms}")
+                logger.info(f"Step 9/9: 发布到 {publish_platforms}")
 
                 # 生成视频描述
                 if not description:
@@ -176,7 +193,7 @@ class PipelineOrchestrator:
                     "results": publish_results,
                 }
             else:
-                logger.info("Step 8/8: 跳过发布")
+                logger.info("Step 9/9: 跳过发布")
                 result["steps"]["publish"] = {"status": "skipped"}
 
             result["status"] = "completed"

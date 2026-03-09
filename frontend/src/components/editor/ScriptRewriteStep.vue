@@ -38,10 +38,10 @@ async function handleRewrite() {
     })
     pipeline.description = descRes.data.text
     pipeline.completeStep('rewrite', { text: res.data.text })
-    pipeline.setActiveStep('synthesize')
+    pipeline.setActiveStep('compliance')
     ElMessage.success('文案仿写成功')
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : '文案仿写失败'
+  } catch (e: any) {
+    const msg = e?.response?.data?.detail || e?.message || '文案仿写失败'
     ElMessage.error(msg)
   } finally {
     pipeline.setStepLoading('rewrite', false)

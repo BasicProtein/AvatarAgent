@@ -103,25 +103,23 @@ const serviceOnlineCount = computed(() => {
 <style scoped>
 .sidebar {
   width: var(--sidebar-width);
-  height: 100%;
+  height: 100vh;
   background-color: var(--color-bg-sidebar);
   border-right: 1px solid var(--color-border-light);
   display: flex;
   flex-direction: column;
-  padding: var(--space-2) var(--space-2);
+  padding: var(--space-3) var(--space-2);
   flex-shrink: 0;
   transition: background-color var(--duration-normal) var(--ease-out);
   user-select: none;
-  min-height: 0;
-  overflow: hidden;
 }
 
 .sidebar-logo {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: 10px var(--space-3);
-  margin-bottom: var(--space-2);
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-3);
+  margin-bottom: var(--space-4);
   cursor: pointer;
   border-radius: var(--radius-md);
   transition: background-color var(--duration-fast);
@@ -132,21 +130,10 @@ const serviceOnlineCount = computed(() => {
 }
 
 .logo-text {
-  font-size: var(--text-base);
+  font-size: var(--text-md);
   font-weight: var(--font-semibold);
   color: var(--color-text-primary);
   letter-spacing: -0.01em;
-}
-
-.logo-icon {
-  width: 24px;
-  height: 24px;
-  flex-shrink: 0;
-}
-
-.logo-icon svg {
-  width: 100%;
-  height: 100%;
 }
 
 .sidebar-nav {
@@ -157,14 +144,14 @@ const serviceOnlineCount = computed(() => {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 2px;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: 9px var(--space-3);
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   cursor: pointer;
   color: var(--color-text-secondary);
@@ -195,7 +182,7 @@ const serviceOnlineCount = computed(() => {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: 6px var(--space-3);
+  padding: var(--space-2) var(--space-3);
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
 }
@@ -218,17 +205,17 @@ const serviceOnlineCount = computed(() => {
 }
 
 .bottom-nav {
-  margin-top: 4px;
-  padding-top: 4px;
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
   border-top: 1px solid var(--color-border-light);
 }
 
 .theme-toggle {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: 9px var(--space-3);
-  margin-top: 2px;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  margin-top: var(--space-1);
   border-radius: var(--radius-md);
   cursor: pointer;
   color: var(--color-text-tertiary);
@@ -239,36 +226,5 @@ const serviceOnlineCount = computed(() => {
 .theme-toggle:hover {
   background-color: var(--color-bg-hover);
   color: var(--color-text-secondary);
-}
-
-@media (max-height: 760px) {
-  .sidebar {
-    padding: 6px var(--space-2);
-  }
-
-  .sidebar-logo {
-    padding: 8px var(--space-2);
-    margin-bottom: 4px;
-  }
-
-  .nav-item,
-  .theme-toggle {
-    padding: 8px var(--space-2);
-  }
-
-  .service-status {
-    padding: 4px var(--space-2);
-  }
-
-  .bottom-nav {
-    margin-top: 2px;
-    padding-top: 2px;
-  }
-}
-
-@media (max-height: 620px) {
-  .sidebar {
-    overflow-y: auto;
-  }
 }
 </style>

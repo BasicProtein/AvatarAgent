@@ -34,20 +34,20 @@ Claude 的 UI 核心是 **"克制的温暖感"**：
 
 ## 三、圆角规范 ⭐ 最核心
 
-Claude 用的是 **精确的 `8px` / `10px` 圆角**，绝非 `9999px` 药丸形或 `4px` 方角。
+按钮和 Badge 统一使用 **胶囊形圆角 `9999px`**，营造柔和、现代的视觉感。输入框等矩形控件保持 `10px` 圆角，形成层次对比。
 
 | 场景 | 圆角值 |
 |---|---|
-| 主操作按钮（Primary） | `10px`（对应 Claude 实测 `9.6px`）|
-| 次要按钮（Secondary/Ghost） | `10px` |
+| 主操作按钮（Primary） | `9999px`（胶囊形）|
+| 次要按钮（Secondary/Ghost） | `9999px`（胶囊形）|
+| Badge / Tag | `9999px`（胶囊形）|
 | 输入框、Select | `10px` |
-| 小标签/Badge | `6px` |
 | 卡片/Panel | `16px` |
 | 对话框/Modal | `20px` |
 | 大圆形图标按钮 | `50%` |
 
-> ❌ 禁止使用 `border-radius: 9999px`（药丸形）用于功能按钮  
-> ❌ 禁止在同一页面内混用不同档位的圆角（如有些按钮 4px 有些 9999px）
+> ✅ 按钮和标签统一使用 `9999px` 胶囊形圆角
+> ❌ 禁止在同一页面内混用不同档位的圆角（如有些按钮 4px 有些 10px）
 
 ---
 
@@ -57,8 +57,8 @@ Claude 用的是 **精确的 `8px` / `10px` 圆角**，绝非 `9999px` 药丸形
 
 | 级别 | 外观 | CSS 关键属性 |
 |---|---|---|
-| **Primary** | 深黑底 + 白字 | `background: #141413; color: #fff; border-radius: 10px; padding: 10px 20px;` |
-| **Secondary** | 透明底 + 极细边框 + 深色字 | `background: transparent; border: 0.67px solid rgba(31,30,29,0.15); border-radius: 10px;` |
+| **Primary** | 深黑底 + 白字 | `background: #141413; color: #fff; border-radius: 9999px; padding: 10px 20px;` |
+| **Secondary** | 透明底 + 极细边框 + 深色字 | `background: transparent; border: 0.67px solid rgba(31,30,29,0.15); border-radius: 9999px;` |
 | **Ghost** | 无背景无边框 + 灰字 | hover 时出现浅背景 |
 | **Danger** | 低饱和红底 | `background: #C0392B; color: #fff;` |
 
@@ -201,7 +201,7 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, A
 ## 十一、开发注意事项
 
 1. **Element Plus 覆盖**：使用 `:deep()` 覆盖 Element Plus 默认样式，特别是 `el-button`、`el-input` 的 `border-radius`
-2. **不用 9999px 圆角**：一律改为 `10px`
+2. **按钮/Badge/Tag 用 `9999px` 胶囊形**，输入框等矩形控件用 `10px`
 3. **边框用 rgba**：使用半透明边框而非固定颜色，适配深色模式
 4. **克制动效**：`transition: all 0.15s ease`，hover 不要放大图标，只改颜色/背景
 5. **留白优先**：宁可元素少，不要堆砌按钮和说明文字

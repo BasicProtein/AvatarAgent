@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useConfigStore } from '../stores/config'
-import { configApi, type CloudGpuConfig, type LocalAsrStatus } from '../api/config'
+import { configApi, type CloudGpuConfig, type CosyVoiceRuntimeStatus, type LocalAsrStatus } from '../api/config'
 import { ElMessage } from 'element-plus'
 
 const configStore = useConfigStore()
@@ -12,6 +12,16 @@ const cloudGpu = ref<CloudGpuConfig>({ enabled: false, api_url: '', api_key: '' 
 const cloudGpuTesting = ref(false)
 const cloudGpuTestResult = ref<{ status: string; model?: string; message?: string } | null>(null)
 const cloudGpuSaving = ref(false)
+const cosyvoiceRuntime = ref<CosyVoiceRuntimeStatus>({
+  device: 'gpu',
+  model_dir: '',
+  torch_cuda_available: false,
+  gpu_name: null,
+  onnxruntime_gpu_installed: false,
+  onnxruntime_providers: [],
+  can_use_gpu: false,
+})
+const cosyvoiceSaving = ref(false)
 
 // ── 本地 ASR 状态 ────────────────────────────────────────────────────────────
 const localAsr = ref<LocalAsrStatus | null>(null)
@@ -45,8 +55,29 @@ onMounted(async () => {
     cloudGpu.value = res.data
   } catch { /* 忽略 */ }
   // 加载本地 ASR 状态
+  await refreshCosyVoiceRuntime()
   await refreshLocalAsr()
 })
+
+async function refreshCosyVoiceRuntime() {
+  try {
+    const res = await configApi.getCosyVoiceRuntime()
+    cosyvoiceRuntime.value = res.data
+  } catch { /* ignore */ }
+}
+
+async function saveCosyVoiceRuntime() {
+  cosyvoiceSaving.value = true
+  try {
+    const res = await configApi.setCosyVoiceRuntime(cosyvoiceRuntime.value.device)
+    await refreshCosyVoiceRuntime()
+    ElMessage.success(res.data.message || 'CosyVoice 运行设置已保存')
+  } catch {
+    ElMessage.error('保存 CosyVoice 运行设置失败')
+  } finally {
+    cosyvoiceSaving.value = false
+  }
+}
 
 async function refreshLocalAsr() {
   localAsrLoading.value = true
@@ -338,6 +369,57 @@ async function testCloudGpu() {
             <li>在上方填写 <code>http://127.0.0.1:6006</code> 并点击"测试连接"</li>
           </ol>
         </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h2 class="section-title">CosyVoice 运行设置</h2>
+      <p class="section-desc">默认使用 GPU。只有在你明确需要 CPU 推理时，才切换到 CPU。</p>
+      <div class="setting-item">
+        <div class="setting-info">
+          <h3>推理设备</h3>
+          <p>修改后需重启 CosyVoice 服务才会生效。</p>
+        </div>
+        <el-select v-model="cosyvoiceRuntime.device" style="width: 180px;" size="large">
+          <el-option label="GPU（默认）" value="gpu" />
+          <el-option label="CPU" value="cpu" />
+        </el-select>
+      </div>
+
+      <div class="asr-detail-grid" style="margin-top: var(--space-3);">
+        <div class="asr-detail-item">
+          <span class="detail-label">Torch CUDA</span>
+          <span :class="cosyvoiceRuntime.torch_cuda_available ? 'ok' : 'warn'">
+            {{ cosyvoiceRuntime.torch_cuda_available ? '可用' : '不可用' }}
+          </span>
+        </div>
+        <div class="asr-detail-item">
+          <span class="detail-label">ONNX Runtime GPU</span>
+          <span :class="cosyvoiceRuntime.onnxruntime_gpu_installed ? 'ok' : 'warn'">
+            {{ cosyvoiceRuntime.onnxruntime_gpu_installed ? '已安装' : '未安装' }}
+          </span>
+        </div>
+        <div class="asr-detail-item">
+          <span class="detail-label">GPU 就绪</span>
+          <span :class="cosyvoiceRuntime.can_use_gpu ? 'ok' : 'warn'">
+            {{ cosyvoiceRuntime.can_use_gpu ? '是' : '否' }}
+          </span>
+        </div>
+        <div class="asr-detail-item">
+          <span class="detail-label">显卡</span>
+          <span :class="cosyvoiceRuntime.gpu_name ? 'ok' : 'warn'">
+            {{ cosyvoiceRuntime.gpu_name || '未检测到' }}
+          </span>
+        </div>
+      </div>
+
+      <div class="cloud-gpu-actions">
+        <el-button type="primary" :loading="cosyvoiceSaving" @click="saveCosyVoiceRuntime">
+          保存设置
+        </el-button>
+        <el-button @click="refreshCosyVoiceRuntime">
+          刷新状态
+        </el-button>
       </div>
     </div>
 

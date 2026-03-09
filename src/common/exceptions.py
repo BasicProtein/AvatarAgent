@@ -51,6 +51,11 @@ class CoverError(AvatarAgentError):
     pass
 
 
+class ComplianceCheckError(AvatarAgentError):
+    """合规审查异常"""
+    pass
+
+
 class UploadError(AvatarAgentError):
     """平台发布异常"""
     pass

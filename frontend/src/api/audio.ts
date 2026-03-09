@@ -32,14 +32,19 @@ export const audioApi = {
      * 用于：合成完成后将 audio_path 传给数字人生成步骤
      */
     synthesizePath: (data: SynthesizeRequest) =>
-        client.post<SynthesizeResponse>('/api/audio/synthesize/path', data),
+        client.post<SynthesizeResponse>('/api/audio/synthesize/path', data, {
+            timeout: 600000,
+        }),
 
     /**
      * 语音合成 — 直接返回 WAV 二进制流
      * 用于：直接下载/预听，不需要路径的场景
      */
     synthesize: (data: SynthesizeRequest) =>
-        client.post('/api/audio/synthesize', data, { responseType: 'blob' }),
+        client.post('/api/audio/synthesize', data, {
+            responseType: 'blob',
+            timeout: 600000,
+        }),
 
     /** 上传参考音频文件 */
     uploadSample: (file: File) => {

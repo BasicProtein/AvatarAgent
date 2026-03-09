@@ -39,6 +39,36 @@ class DescriptionRequest(BaseModel):
     api_key: str = Field(..., description="Deepseek API Key")
 
 
+# ========== 合规审查模块 ==========
+
+class ComplianceCheckRequest(BaseModel):
+    """合规审查请求"""
+    text: str = Field(..., description="待审查文案")
+    api_key: str = Field(..., description="Deepseek API Key")
+
+
+class ProhibitedWordItem(BaseModel):
+    """违禁词命中项"""
+    word: str = Field(..., description="违禁词")
+    position: int = Field(..., description="出现位置")
+    category: str = Field(..., description="违禁词类别")
+
+
+class AiSuggestionItem(BaseModel):
+    """AI 合规建议项"""
+    original: str = Field(..., description="问题原文")
+    suggestion: str = Field(..., description="建议修改")
+    reason: str = Field(..., description="违规原因")
+
+
+class ComplianceCheckResponse(BaseModel):
+    """合规审查响应"""
+    passed: bool = Field(..., description="是否通过审查")
+    prohibited_words: list[ProhibitedWordItem] = Field(default_factory=list, description="命中的违禁词")
+    ai_suggestions: list[AiSuggestionItem] = Field(default_factory=list, description="AI 合规建议")
+    revised_text: str = Field("", description="修正后的文案")
+
+
 # ========== 音频模块 ==========
 
 class VoiceItem(BaseModel):

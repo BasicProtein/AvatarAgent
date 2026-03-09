@@ -8,6 +8,7 @@ const previewType = computed(() => {
   switch (pipeline.activeStep) {
     case 'extract':
     case 'rewrite':
+    case 'compliance':
       return 'text'
     case 'synthesize':
       return 'audio'
@@ -22,7 +23,7 @@ const previewType = computed(() => {
 })
 
 const previewText = computed(() => {
-  return pipeline.rewrittenText || pipeline.extractedText || ''
+  return pipeline.reviewedText || pipeline.rewrittenText || pipeline.extractedText || ''
 })
 
 const previewDescription = computed(() => {
@@ -119,6 +120,7 @@ const coverSrc = computed(() => {
   padding: var(--space-6);
   gap: var(--space-6);
   overflow-y: auto;
+  max-height: 100vh;
 }
 
 .preview-header {
@@ -190,7 +192,7 @@ const coverSrc = computed(() => {
 
 .phone-screen {
   width: 100%;
-  min-height: 590px;
+  height: 590px;
   background: var(--color-bg-page);
   border-radius: 36px;
   overflow: hidden;
@@ -201,10 +203,11 @@ const coverSrc = computed(() => {
 
 .phone-content {
   flex: 1;
-  padding: var(--space-4);
+  padding: 44px var(--space-4) var(--space-3);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  min-height: 0;
 }
 
 .empty-state {
@@ -245,10 +248,7 @@ const coverSrc = computed(() => {
   color: var(--color-text-primary);
   line-height: var(--leading-relaxed);
   white-space: pre-wrap;
-  display: -webkit-box;
-  -webkit-line-clamp: 12;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  word-break: break-all;
 }
 
 .phone-desc {
@@ -258,6 +258,12 @@ const coverSrc = computed(() => {
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
   line-height: var(--leading-relaxed);
+  flex-shrink: 0;
+}
+
+.phone-desc p {
+  margin: 0;
+  word-break: break-all;
 }
 
 /* Video preview */

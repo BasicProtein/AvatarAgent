@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 
 const props = withDefaults(defineProps<{
   stepNumber: number
@@ -18,6 +18,11 @@ const emit = defineEmits<{
 }>()
 
 const isExpanded = ref(props.active)
+
+// Auto-expand when step becomes active
+watch(() => props.active, (val) => {
+  if (val) isExpanded.value = true
+})
 
 function toggle() {
   isExpanded.value = !isExpanded.value
