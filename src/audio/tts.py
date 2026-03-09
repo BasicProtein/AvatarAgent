@@ -22,11 +22,17 @@ VOICES_DIR = PROJECT_ROOT / "resources" / "voices"
 
 DEFAULT_SAMPLE_RATE = 22050
 DEFAULT_CHUNK_CHARS = 80
+DEFAULT_CPU_CHUNK_CHARS = 30
+DEFAULT_MIN_CHUNK_CHARS = 20
 DEFAULT_REQUEST_TIMEOUT = 120.0
 DEFAULT_RETRIES = 2
 
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\u3002\uff01\uff1f!?.;\n])")
 PHRASE_SPLIT_RE = re.compile(r"(?<=[\uFF0C,\u3001\uFF1A:\s])")
+
+
+class _ChunkTimeoutError(TTSError):
+    """Signals that a chunk likely needs to be split smaller before retrying."""
 
 
 def _is_wav(data: bytes) -> bool:
@@ -62,6 +68,7 @@ class TTSEngine:
     def __init__(self) -> None:
         self.config = ConfigManager()
         self.base_url = self.config.get_cosyvoice_url().rstrip("/")
+        self.device = self.config.get_cosyvoice_device()
         self.sample_rate = self.config.get_int(
             "cosyvoice",
             "sample_rate",
@@ -76,6 +83,14 @@ class TTSEngine:
             "cosyvoice",
             "request_timeout",
             DEFAULT_REQUEST_TIMEOUT,
+        )
+        self.min_chunk_chars = max(
+            10,
+            self.config.get_int(
+                "cosyvoice",
+                "min_chunk_chars",
+                DEFAULT_MIN_CHUNK_CHARS,
+            ),
         )
         ensure_dir(VOICES_DIR)
 
@@ -168,20 +183,50 @@ class TTSEngine:
                 total,
                 len(chunk),
             )
-            raw_audio = await self._inference_cross_lingual(chunk, prompt_wav_path)
-            wav_chunks.append(_ensure_wav_bytes(raw_audio, self.sample_rate))
+            wav_chunks.extend(await self._synthesize_chunk(chunk, prompt_wav_path))
 
         if not wav_chunks:
             raise TTSError("CosyVoice returned no audio chunks.")
 
         return self._merge_wav_chunks(wav_chunks)
 
+    async def _synthesize_chunk(self, text: str, prompt_wav_path: str) -> list[bytes]:
+        try:
+            raw_audio = await self._inference_cross_lingual(text, prompt_wav_path)
+            return [_ensure_wav_bytes(raw_audio, self.sample_rate)]
+        except _ChunkTimeoutError as exc:
+            split_chunks = self._split_retry_chunk(text)
+            if not split_chunks:
+                raise TTSError(
+                    f"{exc}. Current chunk length is {len(text)} chars; "
+                    "please shorten the text or use GPU mode."
+                ) from exc
+
+            logger.info(
+                "Retrying timed out TTS chunk by splitting %s chars into %s smaller chunks",
+                len(text),
+                len(split_chunks),
+            )
+
+            wav_chunks: list[bytes] = []
+            for index, chunk in enumerate(split_chunks, start=1):
+                logger.info(
+                    "Submitting split TTS chunk %s/%s (chars=%s)",
+                    index,
+                    len(split_chunks),
+                    len(chunk),
+                )
+                wav_chunks.extend(await self._synthesize_chunk(chunk, prompt_wav_path))
+            return wav_chunks
+
     def _chunk_text(self, text: str) -> list[str]:
         normalized = _normalize_text(text)
         if not normalized:
             return []
 
-        max_chars = max(20, self.chunk_chars)
+        max_chars = max(self.min_chunk_chars, self.chunk_chars)
+        if self.device == "cpu":
+            max_chars = min(max_chars, DEFAULT_CPU_CHUNK_CHARS)
         sentence_parts = [
             part.strip()
             for part in SENTENCE_SPLIT_RE.split(normalized)
@@ -254,6 +299,37 @@ class TTSEngine:
             chunks.append(current)
         return chunks
 
+    def _split_retry_chunk(self, text: str) -> list[str]:
+        if len(text) <= self.min_chunk_chars:
+            return []
+
+        target_chars = max(self.min_chunk_chars, len(text) // 2)
+        split_chunks = self._split_long_sentence(text, target_chars)
+        if len(split_chunks) > 1:
+            return split_chunks
+
+        midpoint = len(text) // 2
+        boundary = self._find_split_boundary(text, midpoint)
+        left = text[:boundary].strip()
+        right = text[boundary:].strip()
+        return [chunk for chunk in (left, right) if chunk]
+
+    def _find_split_boundary(self, text: str, midpoint: int) -> int:
+        separators = (
+            "\uFF0C,\u3001\uFF1A:\uFF1B;"
+            "\u3002\uFF01\uFF1F!? \n"
+        )
+        max_offset = max(1, min(20, len(text) // 3))
+
+        for offset in range(max_offset + 1):
+            for candidate in (midpoint - offset, midpoint + offset):
+                if candidate <= 0 or candidate >= len(text):
+                    continue
+                if text[candidate] in separators:
+                    return candidate
+
+        return midpoint
+
     async def _inference_cross_lingual(
         self,
         tts_text: str,
@@ -292,6 +368,10 @@ class TTSEngine:
                 if not audio_data:
                     raise TTSError("CosyVoice returned an empty audio payload.")
                 return audio_data
+            except httpx.TimeoutException as exc:
+                raise _ChunkTimeoutError(
+                    f"CosyVoice request timed out after {self.request_timeout:.0f}s"
+                ) from exc
             except TTSError as exc:
                 last_error = exc
                 logger.warning(

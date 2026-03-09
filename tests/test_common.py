@@ -1,11 +1,13 @@
 """公共模块单元测试"""
 
+import asyncio
 import os
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from src.audio.tts import TTSEngine, _ChunkTimeoutError, _pcm_to_wav
 from src.common.config_manager import ConfigManager
 from src.common.logger import get_logger
 from src.common.file_utils import (
@@ -105,6 +107,42 @@ class TestConfigManager:
         config.set("deepseek_apikey", "key", ",".join(original_keys))
 
 
+class TestTTSEngine:
+    """TTS engine behavior tests."""
+
+    def test_cpu_chunking_uses_smaller_default_chunks(self):
+        engine = TTSEngine()
+        engine.device = "cpu"
+        engine.chunk_chars = 80
+        engine.min_chunk_chars = 20
+
+        chunks = engine._chunk_text("a" * 79)
+
+        assert len(chunks) >= 3
+        assert max(len(chunk) for chunk in chunks) <= 30
+
+    def test_timeout_chunk_is_split_and_retried(self, monkeypatch):
+        engine = TTSEngine()
+        engine.device = "gpu"
+        engine.chunk_chars = 80
+        engine.min_chunk_chars = 20
+
+        call_lengths: list[int] = []
+
+        async def fake_inference(text: str, prompt_wav_path: str) -> bytes:
+            call_lengths.append(len(text))
+            if len(text) > 20:
+                raise _ChunkTimeoutError("timed out")
+            return _pcm_to_wav(b"\x00\x00" * 32, sample_rate=engine.sample_rate)
+
+        monkeypatch.setattr(engine, "_inference_cross_lingual", fake_inference)
+
+        wav_data = asyncio.run(engine._synthesize_with_chunks("a" * 40, "ignored.wav"))
+
+        assert wav_data.startswith(b"RIFF")
+        assert call_lengths == [40, 20, 20]
+
+
 class TestFileUtils:
     """文件工具测试"""
 
@@ -132,12 +170,13 @@ class TestFileUtils:
 
     def test_get_file_size_mb(self):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as f:
+            temp_path = f.name
             f.write(b"a" * 1024)
             f.flush()
-            size = get_file_size_mb(f.name)
+            size = get_file_size_mb(temp_path)
             assert size > 0
             assert size < 1
-            os.unlink(f.name)
+        os.unlink(temp_path)
 
 
 class TestExceptions:
