@@ -5,7 +5,9 @@
 - AI 深度合规审查（识别不合规表达、语境风险）
 """
 
+import contextlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,24 @@ import httpx
 
 from src.common.logger import get_logger
 from src.common.exceptions import ComplianceCheckError
+
+_PROXY_ENV_KEYS = [
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "all_proxy",
+]
+
+
+@contextlib.contextmanager
+def _no_proxy():
+    """临时禁用代理环境变量"""
+    saved = {}
+    for key in _PROXY_ENV_KEYS:
+        if key in os.environ:
+            saved[key] = os.environ.pop(key)
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 logger = get_logger(__name__)
 
@@ -152,27 +172,28 @@ class ComplianceChecker:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    DEEPSEEK_API_URL,
-                    headers=headers,
-                    json=payload,
-                )
-                response.raise_for_status()
+            with _no_proxy():
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(
+                        DEEPSEEK_API_URL,
+                        headers=headers,
+                        json=payload,
+                    )
+                    response.raise_for_status()
 
-                data = response.json()
-                content = data["choices"][0]["message"]["content"].strip()
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"].strip()
 
-                # 尝试解析 JSON（AI 可能包裹 markdown 代码块）
-                if content.startswith("```"):
-                    content = re.sub(r"^```(?:json)?\s*", "", content)
-                    content = re.sub(r"\s*```$", "", content)
+                    # 尝试解析 JSON（AI 可能包裹 markdown 代码块）
+                    if content.startswith("```"):
+                        content = re.sub(r"^```(?:json)?\s*", "", content)
+                        content = re.sub(r"\s*```$", "", content)
 
-                result = json.loads(content)
-                logger.info(
-                    f"AI 合规审查完成，发现 {len(result.get('issues', []))} 个问题"
-                )
-                return result
+                    result = json.loads(content)
+                    logger.info(
+                        f"AI 合规审查完成，发现 {len(result.get('issues', []))} 个问题"
+                    )
+                    return result
 
         except json.JSONDecodeError as e:
             logger.warning(f"AI 返回格式异常，尝试容错处理: {e}")

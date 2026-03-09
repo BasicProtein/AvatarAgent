@@ -27,6 +27,10 @@ async def extract_script(req: ExtractRequest):
     try:
         text = extractor.extract_from_url(req.video_url)
         return ExtractResponse(text=text)
+    except Exception as e:
+        logger.error(f"文案提取失败: {type(e).__name__}: {e}", exc_info=True)
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=500, content={"detail": str(e)})
     finally:
         extractor.cleanup()
 

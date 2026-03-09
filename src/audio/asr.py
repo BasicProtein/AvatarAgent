@@ -144,8 +144,25 @@ class ASREngine:
             model_size
             or self.config.get("whisper", "model_size", "turbo")
         )
-        # 设备检测延迟到首次使用（避免启动时因 torch 未安装报错）
+        # 设备：尊重用户在设置中的偏好（auto / cuda / cpu）
         self._device: Optional[str] = None
+        self._device_pref = self.config.get_whisper_device()  # auto / cuda / cpu
+
+    def _resolve_device(self) -> str:
+        """根据用户偏好决定推理设备
+
+        - auto: 自动检测最优设备（CUDA > MPS > CPU）
+        - cuda: 强制使用 CUDA GPU
+        - cpu:  强制使用 CPU
+        """
+        if self._device_pref == "cpu":
+            logger.info("用户设置 Whisper 设备为 CPU")
+            return "cpu"
+        if self._device_pref == "cuda":
+            logger.info("用户设置 Whisper 设备为 CUDA")
+            return "cuda"
+        # auto
+        return _detect_device()
 
     async def transcribe(
         self,
@@ -205,7 +222,8 @@ class ASREngine:
         """本地 Whisper 模型带时间戳转录"""
         try:
             if self._device is None:
-                self._device = _detect_device()
+                self._device = self._resolve_device()
+
             use_fp16 = self._device in ("cuda", "mps")
 
             model = _get_whisper_model(self.model_size, self._device)
@@ -233,6 +251,12 @@ class ASREngine:
         except ASRError:
             raise
         except Exception as e:
+            err_msg = str(e)
+            if "out of memory" in err_msg.lower():
+                raise ASRError(
+                    "GPU 显存不足，无法加载 Whisper 模型。"
+                    "请前往「设置」页面将 ASR 设备切换为 CPU，或关闭其他占用显存的程序后重试。"
+                ) from e
             raise ASRError(f"本地带时间戳转录失败: {e}") from e
 
     async def _transcribe_remote_with_timestamps(
@@ -288,7 +312,8 @@ class ASREngine:
         """
         try:
             if self._device is None:
-                self._device = _detect_device()
+                self._device = self._resolve_device()
+
             use_fp16 = self._device in ("cuda", "mps")  # CPU 不支持 fp16
 
             model = _get_whisper_model(self.model_size, self._device)
@@ -310,6 +335,12 @@ class ASREngine:
         except ASRError:
             raise
         except Exception as e:
+            err_msg = str(e)
+            if "out of memory" in err_msg.lower():
+                raise ASRError(
+                    "GPU 显存不足，无法加载 Whisper 模型。"
+                    "请前往「设置」页面将 ASR 设备切换为 CPU，或关闭其他占用显存的程序后重试。"
+                ) from e
             raise ASRError(f"本地转录失败: {e}") from e
 
     async def _transcribe_remote(self, audio_path: str, language: str) -> str:

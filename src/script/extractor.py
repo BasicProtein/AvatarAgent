@@ -551,6 +551,17 @@ class ScriptExtractor:
         import asyncio
         from src.audio.asr import ASREngine
 
+        # Whisper 的 load_audio() 需要通过 subprocess 调用 ffmpeg，
+        # 确保 ffmpeg 所在目录在 PATH 中
+        try:
+            ffmpeg_bin = self.config.get_ffmpeg_path()
+            ffmpeg_dir = str(Path(ffmpeg_bin).parent)
+            if ffmpeg_dir not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+                logger.info(f"已将 ffmpeg 目录添加到 PATH: {ffmpeg_dir}")
+        except Exception:
+            pass
+
         asr = ASREngine()
         try:
             loop = asyncio.get_running_loop()
