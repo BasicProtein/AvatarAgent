@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { usePipelineStore } from '../../stores/pipeline'
 import { useConfigStore } from '../../stores/config'
 import { scriptApi, type ProhibitedWordItem, type AiSuggestionItem } from '../../api/script'
@@ -17,6 +17,18 @@ const prohibitedWords = ref<ProhibitedWordItem[]>([])
 const aiSuggestions = ref<AiSuggestionItem[]>([])
 const revisedText = ref('')
 
+const logs = ref<string[]>([])
+const logBoxRef = ref<HTMLElement | null>(null)
+
+function appendLog(msg: string) {
+  const now = new Date()
+  const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+  logs.value.push(`[${ts}] ${msg}`)
+  nextTick(() => {
+    if (logBoxRef.value) logBoxRef.value.scrollTop = logBoxRef.value.scrollHeight
+  })
+}
+
 async function handleCheck() {
   if (!sourceText.value) {
     ElMessage.warning('请先完成文案仿写')
@@ -26,7 +38,9 @@ async function handleCheck() {
     ElMessage.warning('请在设置中配置 API Key')
     return
   }
+  logs.value = []
   pipeline.setStepLoading('compliance', true)
+  appendLog('开始合规审查...')
   try {
     const res = await scriptApi.complianceCheck({
       text: sourceText.value,
@@ -38,16 +52,25 @@ async function handleCheck() {
     revisedText.value = res.data.revised_text
 
     if (res.data.passed) {
-      // 无违规，直接通过
+      appendLog('✓ 审查通过，未发现合规风险')
       pipeline.reviewedText = sourceText.value
       pipeline.completeStep('compliance', { passed: true })
       pipeline.setActiveStep('synthesize')
       ElMessage.success('文案审查通过，无合规风险')
     } else {
-      ElMessage.warning(`发现 ${prohibitedWords.value.length + aiSuggestions.value.length} 处合规风险，请查看`)
+      const total = prohibitedWords.value.length + aiSuggestions.value.length
+      appendLog(`⚠ 发现 ${total} 处合规风险`)
+      if (prohibitedWords.value.length > 0) {
+        appendLog(`  违禁词：${prohibitedWords.value.map(w => w.word).join('、')}`)
+      }
+      if (aiSuggestions.value.length > 0) {
+        appendLog(`  不合规表达：${aiSuggestions.value.length} 处，请查看详情`)
+      }
+      ElMessage.warning(`发现 ${total} 处合规风险，请查看`)
     }
   } catch (e: any) {
     const msg = e?.response?.data?.detail || e?.message || '合规审查失败'
+    appendLog(`✗ 错误：${msg}`)
     ElMessage.error(msg)
   } finally {
     pipeline.setStepLoading('compliance', false)
@@ -89,6 +112,13 @@ function handleSkip() {
     >
       {{ pipeline.steps.compliance.loading ? '审查中...' : '开始审查' }}
     </el-button>
+
+    <div v-if="logs.length > 0" class="step-log">
+      <p class="result-label">执行日志</p>
+      <div ref="logBoxRef" class="log-box">
+        <p v-for="(line, i) in logs" :key="i" class="log-line">{{ line }}</p>
+      </div>
+    </div>
 
     <!-- 审查结果 -->
     <div v-if="passed !== null" class="review-result">
@@ -328,5 +358,29 @@ function handleSkip() {
 .action-group {
   display: flex;
   gap: var(--space-3);
+}
+
+.step-log {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: rgba(250, 249, 245, 0.6);
+}
+
+.log-box {
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.log-line {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  line-height: 1.6;
+  word-break: break-all;
+  margin: 0;
 }
 </style>

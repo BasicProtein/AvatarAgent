@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { usePipelineStore } from '../../stores/pipeline'
 import { useConfigStore } from '../../stores/config'
 import { scriptApi } from '../../api/script'
@@ -13,6 +13,18 @@ const customPrompt = ref('')
 const apiKey = computed(() => config.apiKeys[0] || '')
 const sourceText = computed(() => pipeline.extractedText || '')
 
+const logs = ref<string[]>([])
+const logBoxRef = ref<HTMLElement | null>(null)
+
+function appendLog(msg: string) {
+  const now = new Date()
+  const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+  logs.value.push(`[${ts}] ${msg}`)
+  nextTick(() => {
+    if (logBoxRef.value) logBoxRef.value.scrollTop = logBoxRef.value.scrollHeight
+  })
+}
+
 async function handleRewrite() {
   if (!sourceText.value) {
     ElMessage.warning('请先提取文案')
@@ -22,8 +34,11 @@ async function handleRewrite() {
     ElMessage.warning('请在设置中配置 API Key')
     return
   }
+  logs.value = []
   pipeline.setStepLoading('rewrite', true)
+  appendLog('开始文案仿写...')
   try {
+    appendLog(`模式：${mode.value === 'auto' ? 'AI 自动仿写' : '自定义指令'}`)
     const res = await scriptApi.rewrite({
       text: sourceText.value,
       api_key: apiKey.value,
@@ -31,17 +46,21 @@ async function handleRewrite() {
       prompt: mode.value === 'custom' ? customPrompt.value : undefined,
     })
     pipeline.rewrittenText = res.data.text
+    appendLog(`✓ 仿写完成，共 ${res.data.text.length} 字`)
     // Also generate description
+    appendLog('生成视频描述...')
     const descRes = await scriptApi.generateDescription({
       text: res.data.text,
       api_key: apiKey.value,
     })
     pipeline.description = descRes.data.text
+    appendLog('✓ 描述生成完成')
     pipeline.completeStep('rewrite', { text: res.data.text })
     pipeline.setActiveStep('compliance')
     ElMessage.success('文案仿写成功')
   } catch (e: any) {
     const msg = e?.response?.data?.detail || e?.message || '文案仿写失败'
+    appendLog(`✗ 错误：${msg}`)
     ElMessage.error(msg)
   } finally {
     pipeline.setStepLoading('rewrite', false)
@@ -85,6 +104,13 @@ async function handleRewrite() {
     >
       {{ pipeline.steps.rewrite.loading ? '仿写中...' : '开始仿写' }}
     </el-button>
+
+    <div v-if="logs.length > 0" class="step-log">
+      <p class="result-label">执行日志</p>
+      <div ref="logBoxRef" class="log-box">
+        <p v-for="(line, i) in logs" :key="i" class="log-line">{{ line }}</p>
+      </div>
+    </div>
 
     <div v-if="pipeline.rewrittenText" class="result-preview">
       <p class="result-label">仿写结果</p>
@@ -151,5 +177,29 @@ async function handleRewrite() {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-weight: var(--font-medium);
+}
+
+.step-log {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: rgba(250, 249, 245, 0.6);
+}
+
+.log-box {
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.log-line {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  line-height: 1.6;
+  word-break: break-all;
+  margin: 0;
 }
 </style>

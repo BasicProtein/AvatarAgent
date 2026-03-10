@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { usePipelineStore } from '../../stores/pipeline'
 import { scriptApi } from '../../api/script'
@@ -11,6 +11,18 @@ const router = useRouter()
 const videoUrl = ref('')
 const extractError = ref('')
 
+const logs = ref<string[]>([])
+const logBoxRef = ref<HTMLElement | null>(null)
+
+function appendLog(msg: string) {
+  const now = new Date()
+  const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+  logs.value.push(`[${ts}] ${msg}`)
+  nextTick(() => {
+    if (logBoxRef.value) logBoxRef.value.scrollTop = logBoxRef.value.scrollHeight
+  })
+}
+
 function goToSettings() {
   router.push('/settings')
 }
@@ -21,12 +33,16 @@ async function handleExtract() {
     return
   }
   extractError.value = ''
+  logs.value = []
   pipeline.setStepLoading('extract', true)
+  appendLog('开始提取视频文案...')
   try {
+    appendLog(`视频链接：${videoUrl.value.trim()}`)
     const res = await scriptApi.extract({ video_url: videoUrl.value.trim() })
     pipeline.extractedText = res.data.text
     pipeline.completeStep('extract', { text: res.data.text })
     pipeline.setActiveStep('rewrite')
+    appendLog(`✓ 提取成功，共 ${res.data.text.length} 字`)
     ElMessage.success('文案提取成功')
   } catch (e: unknown) {
     const axiosErr = e as AxiosError<{ detail?: string }>
@@ -35,8 +51,10 @@ async function handleExtract() {
 
     if (msg.includes('显存不足') || msg.toLowerCase().includes('out of memory')) {
       extractError.value = 'gpu_oom'
+      appendLog('✗ 错误：GPU 显存不足，请切换为 CPU 推理')
     } else {
       extractError.value = msg
+      appendLog(`✗ 错误：${msg}`)
     }
     ElMessage.error(msg)
   } finally {
@@ -84,6 +102,13 @@ async function handleExtract() {
     <!-- 其他错误提示 -->
     <div v-else-if="extractError" class="error-banner">
       <p class="error-desc">{{ extractError }}</p>
+    </div>
+
+    <div v-if="logs.length > 0" class="step-log">
+      <p class="result-label">执行日志</p>
+      <div ref="logBoxRef" class="log-box">
+        <p v-for="(line, i) in logs" :key="i" class="log-line">{{ line }}</p>
+      </div>
     </div>
 
     <div v-if="pipeline.extractedText" class="result-preview">
@@ -156,4 +181,28 @@ async function handleExtract() {
 .error-desc { font-size: var(--text-sm); color: var(--color-text-secondary); line-height: 1.5; }
 .error-action { font-size: var(--text-sm); color: var(--color-text-secondary); margin-top: var(--space-2); }
 .error-action a { color: var(--color-primary); text-decoration: underline; cursor: pointer; }
+
+.step-log {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: rgba(250, 249, 245, 0.6);
+}
+
+.log-box {
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.log-line {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  line-height: 1.6;
+  word-break: break-all;
+  margin: 0;
+}
 </style>

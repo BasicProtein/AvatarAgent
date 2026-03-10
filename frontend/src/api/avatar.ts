@@ -76,3 +76,56 @@ export const avatarApi = {
     checkTuilionnxStatus: () =>
         client.get<{ status: string }>('/api/avatar/service/tuilionnx/status'),
 }
+
+/**
+ * SSE 流式生成数字人视频
+ * 回调 onLog 接收进度日志，onResult 接收最终视频路径，onError 接收错误信息
+ */
+export function generateAvatarStream(
+    data: AvatarGenerateRequest,
+    onLog: (msg: string) => void,
+    onResult: (videoPath: string) => void,
+    onError: (msg: string) => void,
+): () => void {
+    const ctrl = new AbortController()
+
+    ;(async () => {
+        try {
+            const resp = await fetch('/api/avatar/generate/stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data),
+                signal: ctrl.signal,
+            })
+            if (!resp.ok || !resp.body) {
+                onError(`请求失败: ${resp.status}`)
+                return
+            }
+            const reader = resp.body.getReader()
+            const decoder = new TextDecoder()
+            let buf = ''
+            while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+                buf += decoder.decode(value, { stream: true })
+                const lines = buf.split('\n')
+                buf = lines.pop() ?? ''
+                for (const line of lines) {
+                    if (!line.startsWith('data:')) continue
+                    try {
+                        const ev = JSON.parse(line.slice(5).trim())
+                        if (ev.type === 'log') onLog(ev.message)
+                        else if (ev.type === 'result') onResult(ev.video_path ?? '')
+                        else if (ev.type === 'error') onError(ev.message)
+                    } catch { /* skip malformed */ }
+                }
+            }
+        } catch (e: unknown) {
+            if ((e as { name?: string })?.name !== 'AbortError') {
+                onError(e instanceof Error ? e.message : '生成失败')
+            }
+        }
+    })()
+
+    return () => ctrl.abort()
+}

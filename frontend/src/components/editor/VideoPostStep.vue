@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { usePipelineStore } from '../../stores/pipeline'
 import { useConfigStore } from '../../stores/config'
 import { videoApi } from '../../api/video'
@@ -25,6 +25,18 @@ const skipBgm = ref(false)
 const coverText = ref('')
 const useAiCover = ref(false)
 
+const logs = ref<string[]>([])
+const logBoxRef = ref<HTMLElement | null>(null)
+
+function appendLog(msg: string) {
+  const now = new Date()
+  const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+  logs.value.push(`[${ts}] ${msg}`)
+  nextTick(() => {
+    if (logBoxRef.value) logBoxRef.value.scrollTop = logBoxRef.value.scrollHeight
+  })
+}
+
 onMounted(async () => {
   try {
     const [fontsRes, bgmRes] = await Promise.all([
@@ -44,9 +56,12 @@ async function handlePostProd() {
     ElMessage.warning('请先生成数字人视频')
     return
   }
+  logs.value = []
   pipeline.setStepLoading('postprod', true)
+  appendLog('开始视频后期处理...')
   try {
     // Step 1: Add subtitle
+    appendLog('步骤 1/3：添加字幕...')
     const subRes = await videoApi.addSubtitle({
       video_path: videoPath.value,
       text: pipeline.rewrittenText || pipeline.extractedText,
@@ -60,18 +75,24 @@ async function handlePostProd() {
       },
     })
     let currentVideo = subRes.data.video_path
+    appendLog('✓ 字幕添加完成')
 
     // Step 2: Add BGM (optional)
     if (!skipBgm.value) {
+      appendLog('步骤 2/3：添加背景音乐...')
       const bgmRes = await videoApi.addBgm({
         video_path: currentVideo,
         bgm_name: selectedBgm.value || undefined,
         volume: bgmVolume.value,
       })
       currentVideo = bgmRes.data.video_path
+      appendLog('✓ 背景音乐添加完成')
+    } else {
+      appendLog('步骤 2/3：跳过背景音乐')
     }
 
     // Step 3: Generate cover
+    appendLog('步骤 3/3：生成封面...')
     const coverRes = await videoApi.generateCover({
       video_path: currentVideo,
       text: coverText.value,
@@ -83,9 +104,11 @@ async function handlePostProd() {
     pipeline.coverPath = coverRes.data.cover_path
     pipeline.completeStep('postprod')
     pipeline.setActiveStep('publish')
+    appendLog('✓ 后期处理全部完成')
     ElMessage.success('视频后期处理完成')
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : '后期处理失败'
+    appendLog(`✗ 错误：${msg}`)
     ElMessage.error(msg)
   } finally {
     pipeline.setStepLoading('postprod', false)
@@ -170,6 +193,13 @@ async function handlePostProd() {
     >
       {{ pipeline.steps.postprod.loading ? '处理中...' : '开始后期处理' }}
     </el-button>
+
+    <div v-if="logs.length > 0" class="step-log">
+      <p class="result-label">执行日志</p>
+      <div ref="logBoxRef" class="log-box">
+        <p v-for="(line, i) in logs" :key="i" class="log-line">{{ line }}</p>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -224,5 +254,38 @@ async function handlePostProd() {
 .action-btn {
   align-self: flex-start;
   padding: 0 var(--space-6) !important;
+}
+
+.step-log {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: rgba(250, 249, 245, 0.6);
+}
+
+.log-box {
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.log-line {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  line-height: 1.6;
+  word-break: break-all;
+  margin: 0;
+}
+
+.result-label {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: var(--font-medium);
+  margin-bottom: var(--space-2);
 }
 </style>

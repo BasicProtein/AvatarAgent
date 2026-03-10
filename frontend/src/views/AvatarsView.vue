@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { avatarApi, type AvatarModel, type SavedAvatar } from '../api/avatar'
 import { ElMessage } from 'element-plus'
 import type { UploadFile, UploadRawFile } from 'element-plus'
@@ -101,8 +101,17 @@ async function handleDeleteAvatar(name: string) {
   }
 }
 
-// 合并展示：models 目录中的 + 已保存的自定义形象
-const allAvatars = ref<{ name: string; description?: string; tag: string }[]>([])
+// 合并展示：自定义形象 + models 目录中的内置形象（去重）
+const allAvatars = computed(() => {
+  const savedNames = new Set(savedAvatars.value.map(a => a.name))
+  const builtinModels = models.value
+    .filter(m => !savedNames.has(m.name))
+    .map(m => ({ name: m.name, description: '', tag: '内置', video_path: m.path }))
+  return [
+    ...savedAvatars.value.map(a => ({ ...a, tag: '自定义' })),
+    ...builtinModels,
+  ]
+})
 </script>
 
 <template>
@@ -207,10 +216,10 @@ const allAvatars = ref<{ name: string; description?: string; tag: string }[]>([]
         </el-button>
       </div>
 
-      <!-- 已保存自定义形象 -->
-      <div v-if="savedAvatars.length > 0" class="avatar-grid">
+      <!-- 合并展示：自定义形象 + 内置形象 -->
+      <div v-if="allAvatars.length > 0" class="avatar-grid">
         <div
-          v-for="avatar in savedAvatars"
+          v-for="avatar in allAvatars"
           :key="avatar.name"
           class="avatar-card"
         >
@@ -219,7 +228,7 @@ const allAvatars = ref<{ name: string; description?: string; tag: string }[]>([]
           </div>
           <div class="avatar-info-bar">
             <h4 class="avatar-name">{{ avatar.name }}</h4>
-            <div class="avatar-actions">
+            <div v-if="avatar.tag === '自定义'" class="avatar-actions">
               <el-button
                 :icon="Delete as any"
                 circle size="small" type="danger"
@@ -228,33 +237,13 @@ const allAvatars = ref<{ name: string; description?: string; tag: string }[]>([]
             </div>
           </div>
           <div class="avatar-meta">
-            <span class="meta-tag">自定义</span>
+            <span class="meta-tag">{{ avatar.tag }}</span>
             <span class="meta-text">{{ avatar.description || avatar.video_path.split(/[/\\]/).pop() }}</span>
           </div>
         </div>
       </div>
 
-      <!-- HeyGem models 目录中的形象 -->
-      <div v-if="models.length > 0 && savedAvatars.length === 0" class="avatar-grid">
-        <div
-          v-for="model in models"
-          :key="model.name"
-          class="avatar-card"
-        >
-          <div class="avatar-thumb">
-            <el-icon :size="32" color="var(--color-text-placeholder)"><User /></el-icon>
-          </div>
-          <div class="avatar-info-bar">
-            <h4 class="avatar-name">{{ model.name }}</h4>
-          </div>
-          <div class="avatar-meta">
-            <span class="meta-tag">内置</span>
-            <span class="meta-text">{{ model.path.split(/[/\\]/).pop() }}</span>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="savedAvatars.length === 0 && models.length === 0" class="library-empty">
+      <div v-if="allAvatars.length === 0" class="library-empty">
         <el-icon :size="40" color="var(--color-text-placeholder)"><User /></el-icon>
         <p>暂无数字人形象，请在上方上传视频并保存</p>
         <p class="empty-hint">也可将模型文件放入 resources/models/ 目录</p>

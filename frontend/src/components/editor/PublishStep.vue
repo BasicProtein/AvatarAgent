@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, nextTick } from 'vue'
 import { usePipelineStore } from '../../stores/pipeline'
 import { uploadApi } from '../../api/upload'
 import { ElMessage } from 'element-plus'
@@ -14,6 +14,18 @@ const platforms = ref({
 
 const description = ref('')
 const tags = ref('')
+
+const logs = ref<string[]>([])
+const logBoxRef = ref<HTMLElement | null>(null)
+
+function appendLog(msg: string) {
+  const now = new Date()
+  const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+  logs.value.push(`[${ts}] ${msg}`)
+  nextTick(() => {
+    if (logBoxRef.value) logBoxRef.value.scrollTop = logBoxRef.value.scrollHeight
+  })
+}
 
 async function handlePublish() {
   const videoPath = pipeline.finalVideoPath || pipeline.avatarVideoPath
@@ -31,7 +43,10 @@ async function handlePublish() {
     return
   }
 
+  logs.value = []
   pipeline.setStepLoading('publish', true)
+  appendLog('开始发布视频...')
+  appendLog(`目标平台：${selectedPlatforms.join('、')}`)
   try {
     const data = {
       video_path: videoPath,
@@ -42,9 +57,11 @@ async function handlePublish() {
 
     const res = await uploadApi.publishAll(data)
     pipeline.completeStep('publish', res.data)
+    appendLog('✓ 发布成功！')
     ElMessage.success('发布成功！')
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : '发布失败'
+    appendLog(`✗ 错误：${msg}`)
     ElMessage.error(msg)
   } finally {
     pipeline.setStepLoading('publish', false)
@@ -98,6 +115,13 @@ async function handlePublish() {
     >
       {{ pipeline.steps.publish.loading ? '发布中...' : '一键发布' }}
     </el-button>
+
+    <div v-if="logs.length > 0" class="step-log">
+      <p class="result-label">执行日志</p>
+      <div ref="logBoxRef" class="log-box">
+        <p v-for="(line, i) in logs" :key="i" class="log-line">{{ line }}</p>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -137,5 +161,38 @@ async function handlePublish() {
 .action-btn {
   align-self: flex-start;
   padding: 0 var(--space-6) !important;
+}
+
+.step-log {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: rgba(250, 249, 245, 0.6);
+}
+
+.log-box {
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.log-line {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  line-height: 1.6;
+  word-break: break-all;
+  margin: 0;
+}
+
+.result-label {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: var(--font-medium);
+  margin-bottom: var(--space-2);
 }
 </style>
