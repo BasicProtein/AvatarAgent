@@ -1,12 +1,14 @@
 """音频处理路由"""
 
+import asyncio
+import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request, Body
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from src.api.schemas.models import (
     SynthesizeRequest,
@@ -38,7 +40,7 @@ async def list_voices():
 # ─────────────────────────── 语音合成（双接口） ────────────────────────────
 
 @router.post("/synthesize/path", response_model=SynthesizeResponse)
-async def synthesize_path(req: SynthesizeRequest):
+async def synthesize_path(request: Request, req: SynthesizeRequest):
     """语音合成 — 返回 JSON（含服务端绝对路径），供数字人步骤使用。"""
     try:
         audio_path = await tts_engine.synthesize(req.text, req.voice_id, req.speed)
@@ -49,7 +51,7 @@ async def synthesize_path(req: SynthesizeRequest):
     output_dir = config.get_output_dir()
     try:
         rel = Path(audio_path).relative_to(output_dir)
-        audio_url = f"/output/{rel.as_posix()}"
+        audio_url = str(request.url_for("output", path=rel.as_posix()))
     except ValueError:
         audio_url = ""
 
@@ -72,6 +74,78 @@ async def synthesize_path(req: SynthesizeRequest):
     )
 
 
+@router.post("/synthesize/stream")
+async def synthesize_stream(request: Request, req: SynthesizeRequest):
+    """语音合成 — SSE 流式返回进度日志 + 最终结果 JSON。
+
+    事件格式：
+      data: {"type": "log", "message": "..."}
+      data: {"type": "result", "audio_path": "...", "audio_url": "...", "duration": 0.0}
+      data: {"type": "error", "message": "..."}
+    """
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def on_progress(msg: str) -> None:
+        queue.put_nowait(json.dumps({"type": "log", "message": msg}, ensure_ascii=False))
+
+    async def run_synthesis() -> None:
+        try:
+            audio_path = await tts_engine.synthesize(
+                req.text, req.voice_id, req.speed, on_progress=on_progress
+            )
+            output_dir = config.get_output_dir()
+            try:
+                rel = Path(audio_path).relative_to(output_dir)
+                audio_url = str(request.url_for("output", path=rel.as_posix()))
+            except ValueError:
+                audio_url = ""
+
+            duration = 0.0
+            try:
+                ffprobe = config.get_ffmpeg_path().replace("ffmpeg", "ffprobe")
+                result = subprocess.run(
+                    [ffprobe, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+                    capture_output=True, text=True, timeout=15,
+                )
+                duration = float(result.stdout.strip() or 0)
+            except Exception:
+                pass
+
+            queue.put_nowait(json.dumps({
+                "type": "result",
+                "audio_path": audio_path,
+                "audio_url": audio_url,
+                "duration": duration,
+            }, ensure_ascii=False))
+        except TTSError as e:
+            queue.put_nowait(json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False))
+        except Exception as e:
+            queue.put_nowait(json.dumps({"type": "error", "message": f"合成失败: {e}"}, ensure_ascii=False))
+        finally:
+            queue.put_nowait(None)  # sentinel
+
+    async def event_generator():
+        task = asyncio.create_task(run_synthesis())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield f"data: {item}\n\n"
+        finally:
+            task.cancel()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/synthesize")
 async def synthesize_blob(req: SynthesizeRequest):
     """语音合成 — 直接返回 WAV 二进制（供预听使用）。"""
@@ -81,6 +155,23 @@ async def synthesize_blob(req: SynthesizeRequest):
         logger.warning("Synthesize blob failed: %s", e)
         raise HTTPException(status_code=503, detail=str(e))
     return FileResponse(audio_path, media_type="audio/wav", filename="synthesized.wav")
+
+
+@router.post("/generated")
+async def get_generated_audio(audio_path: str = Body(..., embed=True)):
+    """返回已生成音频文件，供前端以 blob 方式预听。"""
+    output_dir = config.get_output_dir().resolve()
+    file_path = Path(audio_path).resolve()
+
+    try:
+        file_path.relative_to(output_dir)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="音频文件不在输出目录内")
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="音频文件不存在")
+
+    return Response(content=file_path.read_bytes(), media_type="application/octet-stream")
 
 
 # ─────────────────────────────── 参考音频上传 ─────────────────────────────

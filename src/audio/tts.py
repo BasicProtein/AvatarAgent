@@ -6,7 +6,9 @@ import io
 import re
 import subprocess
 import wave
+from collections.abc import Callable
 from pathlib import Path
+from typing import Optional
 
 import httpx
 
@@ -19,8 +21,13 @@ logger = get_logger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 VOICES_DIR = PROJECT_ROOT / "resources" / "voices"
+DEFAULT_COSYVOICE2_MODEL_DIR = (
+    PROJECT_ROOT / "third_party" / "models" / "modelscope_cache" / "hub" / "iic" / "CosyVoice2-0___5B"
+)
 
 DEFAULT_SAMPLE_RATE = 22050
+COSYVOICE2_SAMPLE_RATE = 24000
+COSYVOICE_SAMPLE_RATE_HEADER = "x-cosyvoice-sample-rate"
 DEFAULT_CHUNK_CHARS = 80
 DEFAULT_CPU_CHUNK_CHARS = 30
 DEFAULT_MIN_CHUNK_CHARS = 20
@@ -64,16 +71,26 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def _infer_sample_rate_from_model_ref(model_ref: str) -> int | None:
+    normalized = model_ref.replace("\\", "/").lower()
+    if "cosyvoice3" in normalized or "cosyvoice2" in normalized:
+        return COSYVOICE2_SAMPLE_RATE
+    if "cosyvoice" in normalized:
+        return DEFAULT_SAMPLE_RATE
+    return None
+
+
 class TTSEngine:
     def __init__(self) -> None:
         self.config = ConfigManager()
         self.base_url = self.config.get_cosyvoice_url().rstrip("/")
         self.device = self.config.get_cosyvoice_device()
-        self.sample_rate = self.config.get_int(
+        self.configured_sample_rate = self.config.get_int(
             "cosyvoice",
             "sample_rate",
-            DEFAULT_SAMPLE_RATE,
+            0,
         )
+        self.sample_rate = self._resolve_default_sample_rate()
         self.chunk_chars = self.config.get_int(
             "cosyvoice",
             "chunk_chars",
@@ -93,6 +110,45 @@ class TTSEngine:
             ),
         )
         ensure_dir(VOICES_DIR)
+
+    def _resolve_default_sample_rate(self) -> int:
+        model_ref = self.config.get_cosyvoice_model_dir()
+        if not model_ref and DEFAULT_COSYVOICE2_MODEL_DIR.exists():
+            model_ref = str(DEFAULT_COSYVOICE2_MODEL_DIR)
+
+        inferred_sample_rate = _infer_sample_rate_from_model_ref(model_ref)
+        if inferred_sample_rate is not None:
+            if (
+                self.configured_sample_rate > 0
+                and self.configured_sample_rate != inferred_sample_rate
+            ):
+                logger.warning(
+                    "Configured cosyvoice.sample_rate=%s conflicts with model '%s'; using %s Hz",
+                    self.configured_sample_rate,
+                    model_ref,
+                    inferred_sample_rate,
+                )
+            return inferred_sample_rate
+
+        if self.configured_sample_rate > 0:
+            return self.configured_sample_rate
+
+        return DEFAULT_SAMPLE_RATE
+
+    def _resolve_response_sample_rate(self, response: httpx.Response) -> int:
+        response_sample_rate = response.headers.get(COSYVOICE_SAMPLE_RATE_HEADER, "")
+        if response_sample_rate:
+            try:
+                sample_rate = int(response_sample_rate)
+                if sample_rate > 0:
+                    return sample_rate
+            except ValueError:
+                logger.warning(
+                    "Invalid %s header from CosyVoice: %s",
+                    COSYVOICE_SAMPLE_RATE_HEADER,
+                    response_sample_rate,
+                )
+        return self.sample_rate
 
     def list_voices(self) -> list[dict]:
         voices: list[dict] = []
@@ -117,6 +173,7 @@ class TTSEngine:
         text: str,
         voice_id: int = 0,
         speed: float = 1.0,
+        on_progress: Optional[Callable[[str], None]] = None,
     ) -> str:
         voices = self.list_voices()
         if not voices:
@@ -131,18 +188,26 @@ class TTSEngine:
             voice["name"],
             speed,
         )
+        if on_progress:
+            on_progress(f"使用音色「{voice['name']}」，语速 {speed}x")
 
         output_dir = self.config.get_output_dir() / "audio"
         ensure_dir(output_dir)
         output_path = str(output_dir / generate_unique_filename("wav", "tts"))
 
-        audio_data = await self._synthesize_with_chunks(text, voice["path"])
+        audio_data = await self._synthesize_with_chunks(text, voice["path"], on_progress=on_progress)
+        if on_progress:
+            on_progress("正在保存音频文件...")
         self._save_audio(audio_data, output_path)
 
         if abs(speed - 1.0) > 0.05:
+            if on_progress:
+                on_progress(f"正在调整语速（{speed}x）...")
             output_path = self._adjust_speed(output_path, speed)
 
         logger.info("Speech synthesis finished: %s", output_path)
+        if on_progress:
+            on_progress(f"合成完成：{output_path}")
         return output_path
 
     async def clone_voice(
@@ -168,13 +233,20 @@ class TTSEngine:
         logger.info("Voice clone synthesis finished: %s", output_path)
         return output_path
 
-    async def _synthesize_with_chunks(self, text: str, prompt_wav_path: str) -> bytes:
+    async def _synthesize_with_chunks(
+        self,
+        text: str,
+        prompt_wav_path: str,
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> bytes:
         chunks = self._chunk_text(text)
         if not chunks:
             raise TTSError("Text is empty. Nothing to synthesize.")
 
         wav_chunks: list[bytes] = []
         total = len(chunks)
+        if on_progress:
+            on_progress(f"文本已分割为 {total} 个片段，开始合成...")
 
         for index, chunk in enumerate(chunks, start=1):
             logger.info(
@@ -183,17 +255,29 @@ class TTSEngine:
                 total,
                 len(chunk),
             )
-            wav_chunks.extend(await self._synthesize_chunk(chunk, prompt_wav_path))
+            if on_progress:
+                on_progress(f"[{index}/{total}] 合成片段（{len(chunk)} 字）：{chunk[:20]}{'...' if len(chunk) > 20 else ''}")
+            wav_chunks.extend(await self._synthesize_chunk(chunk, prompt_wav_path, on_progress=on_progress))
 
         if not wav_chunks:
             raise TTSError("CosyVoice returned no audio chunks.")
 
+        if total > 1 and on_progress:
+            on_progress(f"正在合并 {total} 个音频片段...")
         return self._merge_wav_chunks(wav_chunks)
 
-    async def _synthesize_chunk(self, text: str, prompt_wav_path: str) -> list[bytes]:
+    async def _synthesize_chunk(
+        self,
+        text: str,
+        prompt_wav_path: str,
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> list[bytes]:
         try:
-            raw_audio = await self._inference_cross_lingual(text, prompt_wav_path)
-            return [_ensure_wav_bytes(raw_audio, self.sample_rate)]
+            raw_audio, sample_rate = await self._inference_cross_lingual(
+                text,
+                prompt_wav_path,
+            )
+            return [_ensure_wav_bytes(raw_audio, sample_rate)]
         except _ChunkTimeoutError as exc:
             split_chunks = self._split_retry_chunk(text)
             if not split_chunks:
@@ -207,6 +291,8 @@ class TTSEngine:
                 len(text),
                 len(split_chunks),
             )
+            if on_progress:
+                on_progress(f"片段超时，自动拆分为 {len(split_chunks)} 个子片段重试...")
 
             wav_chunks: list[bytes] = []
             for index, chunk in enumerate(split_chunks, start=1):
@@ -216,7 +302,9 @@ class TTSEngine:
                     len(split_chunks),
                     len(chunk),
                 )
-                wav_chunks.extend(await self._synthesize_chunk(chunk, prompt_wav_path))
+                if on_progress:
+                    on_progress(f"  子片段 [{index}/{len(split_chunks)}]（{len(chunk)} 字）")
+                wav_chunks.extend(await self._synthesize_chunk(chunk, prompt_wav_path, on_progress=on_progress))
             return wav_chunks
 
     def _chunk_text(self, text: str) -> list[str]:
@@ -334,7 +422,7 @@ class TTSEngine:
         self,
         tts_text: str,
         prompt_wav_path: str,
-    ) -> bytes:
+    ) -> tuple[bytes, int]:
         prompt_path = Path(prompt_wav_path)
         if not prompt_path.exists():
             raise TTSError(f"Voice sample not found: {prompt_wav_path}")
@@ -367,7 +455,7 @@ class TTSEngine:
                 audio_data = response.content
                 if not audio_data:
                     raise TTSError("CosyVoice returned an empty audio payload.")
-                return audio_data
+                return audio_data, self._resolve_response_sample_rate(response)
             except httpx.TimeoutException as exc:
                 raise _ChunkTimeoutError(
                     f"CosyVoice request timed out after {self.request_timeout:.0f}s"
@@ -417,6 +505,14 @@ class TTSEngine:
                         merged.setnchannels(channels)
                         merged.setsampwidth(sample_width)
                         merged.setframerate(sample_rate)
+                    elif (
+                        chunk.getnchannels() != channels
+                        or chunk.getsampwidth() != sample_width
+                        or chunk.getframerate() != sample_rate
+                    ):
+                        raise TTSError(
+                            "CosyVoice returned inconsistent audio format across chunks."
+                        )
                     merged.writeframes(chunk.readframes(chunk.getnframes()))
 
         return output.getvalue()

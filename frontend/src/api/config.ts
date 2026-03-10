@@ -16,6 +16,23 @@ export interface LocalAsrStatus {
     whisper_device: 'auto' | 'cuda' | 'cpu'
 }
 
+export interface CosyVoiceModelItem {
+    name: string
+    cached: boolean
+}
+
+export interface CosyVoiceModelsStatus {
+    all_ready: boolean
+    models: CosyVoiceModelItem[]
+}
+
+export interface CosyVoiceModelsUpdateResult {
+    status: 'success' | 'partial' | 'error'
+    message: string
+    updated: string[]
+    errors: string[]
+}
+
 export interface CosyVoiceRuntimeStatus {
     device: 'gpu' | 'cpu'
     model_dir: string
@@ -29,6 +46,13 @@ export interface CosyVoiceRuntimeStatus {
     main_model_gpu_ready?: boolean
     full_gpu_ready?: boolean
     can_use_gpu: boolean
+}
+
+export interface CosyVoiceRestartResponse {
+    status: string
+    message: string
+    pid?: number
+    stopped_pids?: number[]
 }
 
 export const configApi = {
@@ -74,4 +98,13 @@ export const configApi = {
             '/api/config/cosyvoice-runtime',
             { device },
         ),
+
+    restartCosyVoice: () =>
+        client.post<CosyVoiceRestartResponse>('/api/config/cosyvoice-runtime/restart', {}),
+
+    getCosyVoiceModelsStatus: () =>
+        client.get<CosyVoiceModelsStatus>('/api/config/cosyvoice-models/status'),
+
+    updateCosyVoiceModels: () =>
+        client.post<CosyVoiceModelsUpdateResult>('/api/config/cosyvoice-models/update', {}),
 }

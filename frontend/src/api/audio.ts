@@ -1,5 +1,71 @@
 import client from './client'
 
+export type SynthesizeStreamEvent =
+    | { type: 'log'; message: string }
+    | { type: 'result'; audio_path: string; audio_url: string; duration: number }
+    | { type: 'error'; message: string }
+
+/**
+ * 语音合成 SSE 流式接口，通过 fetch POST 消费 text/event-stream。
+ * 调用方传入 onEvent 回调接收每一条事件，传入 signal 可取消。
+ */
+export async function synthesizeStream(
+    data: { text: string; voice_id: number; speed: number },
+    onEvent: (event: SynthesizeStreamEvent) => void,
+    signal?: AbortSignal,
+): Promise<void> {
+    const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '')
+    const url = `${apiBaseUrl}/api/audio/synthesize/stream`
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        signal,
+    })
+
+    if (!response.ok) {
+        // 如果流式端点不存在（后端未重启），降级到普通 JSON 接口
+        if (response.status === 404) {
+            onEvent({ type: 'log', message: '流式接口不可用，使用普通模式合成...' })
+            const fallback = await client.post<{ audio_path: string; audio_url: string; duration: number }>(
+                '/api/audio/synthesize/path',
+                data,
+                { timeout: 600000 },
+            )
+            onEvent({ type: 'result', ...fallback.data })
+            return
+        }
+        let detail = response.statusText
+        try {
+            const json = await response.json()
+            detail = json?.detail || detail
+        } catch { /* ignore */ }
+        throw new Error(detail)
+    }
+
+    const reader = response.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed.startsWith('data:')) continue
+            const payload = trimmed.slice(5).trim()
+            if (!payload) continue
+            try {
+                onEvent(JSON.parse(payload) as SynthesizeStreamEvent)
+            } catch { /* ignore malformed */ }
+        }
+    }
+}
+
 export interface VoiceItem {
     name: string
     path: string
@@ -42,6 +108,15 @@ export const audioApi = {
      */
     synthesize: (data: SynthesizeRequest) =>
         client.post('/api/audio/synthesize', data, {
+            responseType: 'blob',
+            timeout: 600000,
+        }),
+
+    /** 根据已生成的音频路径拉取 blob，供浏览器本地预听 */
+    fetchAudioBlob: (audioPath: string) =>
+        client.post('/api/audio/generated', {
+            audio_path: audioPath,
+        }, {
             responseType: 'blob',
             timeout: 600000,
         }),

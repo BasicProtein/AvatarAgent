@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -233,6 +234,137 @@ def get_cosyvoice_runtime_status() -> dict:
     return status
 
 
+def _list_cosyvoice_processes(port: int) -> list[dict]:
+    if sys.platform == "win32":
+        script = f"""
+$pattern = 'runtime[\\\\/]+python[\\\\/]+fastapi[\\\\/]+server\\.py'
+$items = Get-CimInstance Win32_Process |
+    Where-Object {{
+        $_.Name -eq 'python.exe' -and
+        $_.CommandLine -match $pattern -and
+        $_.CommandLine -match '--port\\s+{port}(\\s|$)'
+    }} |
+    Select-Object ProcessId, CommandLine
+if (-not $items) {{
+    '[]'
+}} else {{
+    $items | ConvertTo-Json -Compress
+}}
+"""
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                logger.warning("Failed to inspect CosyVoice processes: %s", result.stderr.strip())
+                return []
+            payload = result.stdout.strip() or "[]"
+            data = json.loads(payload)
+            if isinstance(data, dict):
+                return [data]
+            if isinstance(data, list):
+                return data
+        except Exception as exc:
+            logger.warning("Failed to inspect CosyVoice processes: %s", exc)
+        return []
+
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            logger.warning("Failed to inspect CosyVoice processes: %s", result.stderr.strip())
+            return []
+
+        matches: list[dict] = []
+        port_token = f"--port {port}"
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            parts = stripped.split(None, 1)
+            if len(parts) != 2:
+                continue
+            pid_text, command_line = parts
+            normalized = command_line.replace("\\", "/")
+            if "runtime/python/fastapi/server.py" not in normalized:
+                continue
+            if port_token not in command_line:
+                continue
+            matches.append({"ProcessId": int(pid_text), "CommandLine": command_line})
+        return matches
+    except Exception as exc:
+        logger.warning("Failed to inspect CosyVoice processes: %s", exc)
+        return []
+
+
+def _terminate_process(pid: int) -> bool:
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                return True
+            logger.warning("Failed to stop CosyVoice PID %s: %s", pid, result.stderr.strip())
+            return False
+
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return True
+    except Exception as exc:
+        logger.warning("Failed to stop CosyVoice PID %s: %s", pid, exc)
+        return False
+
+
+def stop_cosyvoice(port: int = 50000) -> dict:
+    processes = _list_cosyvoice_processes(port)
+    stopped_pids: list[int] = []
+
+    for process in processes:
+        pid = int(process["ProcessId"])
+        if _terminate_process(pid):
+            stopped_pids.append(pid)
+
+    host = ConfigManager().get("cosyvoice", "host", "127.0.0.1")
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if not check_cosyvoice_health(host=host, port=port):
+            break
+        time.sleep(0.5)
+
+    online = check_cosyvoice_health(host=host, port=port)
+    if online:
+        return {
+            "status": "error",
+            "stopped_pids": stopped_pids,
+            "message": f"CosyVoice 服务未能在端口 {port} 上停止。",
+        }
+
+    if stopped_pids:
+        return {
+            "status": "success",
+            "stopped_pids": stopped_pids,
+            "message": f"已停止 CosyVoice 服务（PID: {', '.join(str(pid) for pid in stopped_pids)}）。",
+        }
+
+    return {
+        "status": "success",
+        "stopped_pids": [],
+        "message": "CosyVoice 服务当前未在运行。",
+    }
+
+
 def start_cosyvoice(port: int = 50000, device: str | None = None) -> subprocess.Popen | None:
     if not check_cosyvoice_installed():
         logger.error("CosyVoice is not installed.")
@@ -252,6 +384,9 @@ def start_cosyvoice(port: int = 50000, device: str | None = None) -> subprocess.
     cache_dir = PROJECT_ROOT / "third_party" / "models" / "modelscope_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     env["MODELSCOPE_CACHE"] = str(cache_dir)
+    # 禁止 CosyVoice 在每次推理时自动联网检查/下载模型
+    # 用户需要手动触发更新（通过设置页面的"更新模型"按钮）
+    env["MODELSCOPE_OFFLINE"] = "1"
     if device_policy == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = "-1"
     else:
@@ -296,6 +431,46 @@ def start_cosyvoice(port: int = 50000, device: str | None = None) -> subprocess.
         return None
 
 
+def restart_cosyvoice(port: int = 50000, device: str | None = None) -> dict:
+    config = ConfigManager()
+    host = config.get("cosyvoice", "host", "127.0.0.1")
+    stop_result = stop_cosyvoice(port=port)
+    if stop_result["status"] != "success":
+        return stop_result
+
+    proc = start_cosyvoice(port=port, device=device)
+    if not proc:
+        return {
+            "status": "error",
+            "stopped_pids": stop_result.get("stopped_pids", []),
+            "message": "CosyVoice 服务启动失败，请检查日志。",
+        }
+
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        if check_cosyvoice_health(host=host, port=port):
+            stopped = stop_result.get("stopped_pids", [])
+            stopped_text = (
+                f"，已停止旧进程 {', '.join(str(pid) for pid in stopped)}"
+                if stopped
+                else ""
+            )
+            return {
+                "status": "success",
+                "pid": proc.pid,
+                "stopped_pids": stopped,
+                "message": f"CosyVoice 服务已重启，当前 PID={proc.pid}{stopped_text}。",
+            }
+        time.sleep(0.5)
+
+    return {
+        "status": "error",
+        "pid": proc.pid,
+        "stopped_pids": stop_result.get("stopped_pids", []),
+        "message": f"CosyVoice 进程已启动（PID={proc.pid}），但端口 {port} 在超时内未就绪。",
+    }
+
+
 def check_cosyvoice_health(host: str = "127.0.0.1", port: int = 50000) -> bool:
     import urllib.error
     import urllib.request
@@ -306,6 +481,81 @@ def check_cosyvoice_health(host: str = "127.0.0.1", port: int = 50000) -> bool:
             return response.status == 200
     except (urllib.error.URLError, OSError, TimeoutError):
         return False
+
+
+def update_cosyvoice_models() -> dict:
+    """联网拉取 CosyVoice 所需模型的最新版本，仅在用户主动触发时调用。
+
+    下载目标：
+      - iic/CosyVoice2-0.5B（主模型）
+      - pengzhendong/wetext（前端文本处理模型）
+
+    所有模型缓存到项目内的 third_party/models/modelscope_cache，
+    不写入 C 盘或系统用户目录。
+    """
+    python_exe = _get_cosyvoice_python()
+    cache_dir = PROJECT_ROOT / "third_party" / "models" / "modelscope_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    model_dir = _resolve_model_dir(ConfigManager())
+    code = f"""
+import os, json, sys
+os.environ["MODELSCOPE_CACHE"] = {json.dumps(str(cache_dir))}
+os.environ.pop("MODELSCOPE_OFFLINE", None)
+
+results = []
+errors = []
+
+try:
+    from modelscope.hub.snapshot_download import snapshot_download
+    snapshot_download("pengzhendong/wetext", cache_dir={json.dumps(str(cache_dir))})
+    results.append("pengzhendong/wetext")
+except Exception as e:
+    errors.append(f"pengzhendong/wetext: {{e}}")
+
+try:
+    from modelscope.hub.snapshot_download import snapshot_download
+    snapshot_download("iic/CosyVoice2-0.5B", cache_dir={json.dumps(str(cache_dir))})
+    results.append("iic/CosyVoice2-0.5B")
+except Exception as e:
+    errors.append(f"iic/CosyVoice2-0.5B: {{e}}")
+
+print(json.dumps({{"updated": results, "errors": errors}}))
+"""
+    try:
+        result = subprocess.run(
+            [python_exe, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=str(COSYVOICE_DIR),
+        )
+        raw = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "{}"
+        data = json.loads(raw)
+        if result.returncode != 0 and not data.get("updated"):
+            return {
+                "status": "error",
+                "message": f"模型更新失败: {result.stderr.strip()[:300]}",
+                "updated": [],
+                "errors": [result.stderr.strip()[:300]],
+            }
+        if data.get("errors"):
+            return {
+                "status": "partial",
+                "message": f"部分更新成功: {', '.join(data['updated'])}；失败: {', '.join(data['errors'])}",
+                "updated": data.get("updated", []),
+                "errors": data.get("errors", []),
+            }
+        return {
+            "status": "success",
+            "message": f"模型已更新: {', '.join(data['updated'])}",
+            "updated": data.get("updated", []),
+            "errors": [],
+        }
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "message": "模型更新超时（超过 10 分钟）", "updated": [], "errors": []}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc), "updated": [], "errors": []}
 
 
 def setup_cosyvoice() -> bool:

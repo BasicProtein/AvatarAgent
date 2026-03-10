@@ -32,6 +32,12 @@ const synthEmotion = ref('')
 const synthLoading = ref(false)
 const synthAudioUrl = ref('')
 
+function revokeObjectUrl(url: string) {
+  if (url.startsWith('blob:')) {
+    URL.revokeObjectURL(url)
+  }
+}
+
 const emotionOptions = [
   { label: '默认', value: '' },
   { label: '开心', value: 'happy' },
@@ -62,6 +68,7 @@ onBeforeUnmount(() => {
   // 离开页面时清理录音资源
   stopRecordingCleanup()
   if (recordPreviewUrl.value) URL.revokeObjectURL(recordPreviewUrl.value)
+  revokeObjectUrl(synthAudioUrl.value)
   // 清理音色预览音频
   if (previewAudio.value) {
     previewAudio.value.pause()
@@ -340,13 +347,22 @@ async function handleSynthesize() {
   }
   synthLoading.value = true
   try {
-    const res = await audioApi.synthesize({
+    const res = await audioApi.synthesizePath({
       text: synthText.value,
       voice_id: selectedVoiceIdx.value,
       speed: Number(speedValue.value),
     })
-    const blob = new Blob([res.data], { type: 'audio/wav' })
-    synthAudioUrl.value = URL.createObjectURL(blob)
+    revokeObjectUrl(synthAudioUrl.value)
+    if (res.data.audio_url) {
+      try {
+        const previewRes = await audioApi.fetchAudioBlob(res.data.audio_path)
+        synthAudioUrl.value = URL.createObjectURL(new Blob([previewRes.data], { type: 'audio/wav' }))
+      } catch {
+        synthAudioUrl.value = res.data.audio_url
+      }
+    } else {
+      synthAudioUrl.value = ''
+    }
     ElMessage.success('语音生成成功')
   } catch {
     ElMessage.error('语音生成失败')

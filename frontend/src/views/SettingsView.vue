@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useConfigStore } from '../stores/config'
-import { configApi, type CloudGpuConfig, type CosyVoiceRuntimeStatus, type LocalAsrStatus } from '../api/config'
+import { configApi, type CloudGpuConfig, type CosyVoiceRuntimeStatus, type LocalAsrStatus, type CosyVoiceModelsStatus } from '../api/config'
 import { ElMessage } from 'element-plus'
 
 const configStore = useConfigStore()
@@ -22,6 +22,11 @@ const cosyvoiceRuntime = ref<CosyVoiceRuntimeStatus>({
   can_use_gpu: false,
 })
 const cosyvoiceSaving = ref(false)
+const cosyvoiceRestarting = ref(false)
+const cosyvoiceModels = ref<CosyVoiceModelsStatus | null>(null)
+const cosyvoiceModelsLoading = ref(false)
+const cosyvoiceModelsUpdating = ref(false)
+const cosyvoiceModelsUpdateResult = ref<{ status: string; message: string } | null>(null)
 
 // ── 本地 ASR 状态 ────────────────────────────────────────────────────────────
 const localAsr = ref<LocalAsrStatus | null>(null)
@@ -59,6 +64,7 @@ onMounted(async () => {
   // 加载本地 ASR 状态
   await refreshCosyVoiceRuntime()
   await refreshLocalAsr()
+  await refreshCosyVoiceModels()
 })
 
 async function refreshCosyVoiceRuntime() {
@@ -78,6 +84,54 @@ async function saveCosyVoiceRuntime() {
     ElMessage.error('保存 CosyVoice 运行设置失败')
   } finally {
     cosyvoiceSaving.value = false
+  }
+}
+
+async function refreshCosyVoiceModels() {
+  cosyvoiceModelsLoading.value = true
+  try {
+    const res = await configApi.getCosyVoiceModelsStatus()
+    cosyvoiceModels.value = res.data
+  } catch { /* ignore */ } finally {
+    cosyvoiceModelsLoading.value = false
+  }
+}
+
+async function updateCosyVoiceModels() {
+  cosyvoiceModelsUpdating.value = true
+  cosyvoiceModelsUpdateResult.value = null
+  try {
+    const res = await configApi.updateCosyVoiceModels()
+    cosyvoiceModelsUpdateResult.value = { status: res.data.status, message: res.data.message }
+    await refreshCosyVoiceModels()
+    if (res.data.status === 'success') {
+      ElMessage.success(res.data.message)
+    } else {
+      ElMessage.warning(res.data.message)
+    }
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail || '模型更新失败'
+    cosyvoiceModelsUpdateResult.value = { status: 'error', message: detail }
+    ElMessage.error(detail)
+  } finally {
+    cosyvoiceModelsUpdating.value = false
+  }
+}
+
+async function restartCosyVoice() {
+  cosyvoiceRestarting.value = true
+  try {
+    const res = await configApi.restartCosyVoice()
+    await Promise.all([
+      refreshCosyVoiceRuntime(),
+      configStore.fetchServices(),
+    ])
+    ElMessage.success(res.data.message || 'CosyVoice 服务已重启')
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    ElMessage.error(detail || '重启 CosyVoice 服务失败')
+  } finally {
+    cosyvoiceRestarting.value = false
   }
 }
 
@@ -450,9 +504,65 @@ async function testCloudGpu() {
         <el-button type="primary" :loading="cosyvoiceSaving" @click="saveCosyVoiceRuntime">
           保存设置
         </el-button>
+        <el-button :loading="cosyvoiceRestarting" @click="restartCosyVoice">
+          重启服务
+        </el-button>
         <el-button @click="refreshCosyVoiceRuntime">
           刷新状态
         </el-button>
+      </div>
+
+      <!-- 模型缓存管理 -->
+      <div class="models-panel">
+        <div class="models-panel-header">
+          <div>
+            <p class="models-panel-title">本地模型缓存</p>
+            <p class="models-panel-desc">
+              模型缓存在项目目录内，<strong>平时完全离线运行</strong>，不会自动联网检查更新。
+              如需获取最新模型版本，请手动点击下方按钮。
+            </p>
+          </div>
+          <el-button
+            size="small"
+            :loading="cosyvoiceModelsLoading"
+            @click="refreshCosyVoiceModels"
+          >
+            <el-icon><Refresh /></el-icon>
+          </el-button>
+        </div>
+
+        <div v-if="cosyvoiceModels" class="models-list">
+          <div
+            v-for="m in cosyvoiceModels.models"
+            :key="m.name"
+            class="model-cache-item"
+          >
+            <span class="model-cache-name">{{ m.name }}</span>
+            <span class="model-cache-badge" :class="m.cached ? 'cached' : 'missing'">
+              {{ m.cached ? '已缓存' : '未下载' }}
+            </span>
+          </div>
+        </div>
+
+        <div class="models-update-row">
+          <el-button
+            type="primary"
+            :loading="cosyvoiceModelsUpdating"
+            @click="updateCosyVoiceModels"
+          >
+            {{ cosyvoiceModelsUpdating ? '更新中...' : '更新模型' }}
+          </el-button>
+          <span class="models-update-hint">将联网拉取最新版本，缓存到项目目录</span>
+        </div>
+
+        <div
+          v-if="cosyvoiceModelsUpdateResult"
+          class="models-update-result"
+          :class="cosyvoiceModelsUpdateResult.status"
+        >
+          {{ cosyvoiceModelsUpdateResult.status === 'success' ? '✅' : cosyvoiceModelsUpdateResult.status === 'partial' ? '⚠️' : '❌' }}
+          {{ cosyvoiceModelsUpdateResult.message }}
+        </div>
       </div>
     </div>
 
@@ -612,4 +722,79 @@ code.cmd {
 .model-name { font-size: var(--text-sm); font-weight: var(--font-semibold); color: var(--color-text-primary); font-family: var(--font-mono); }
 .model-size { font-size: var(--text-xs); color: var(--color-text-secondary); }
 .model-desc { font-size: var(--text-xs); color: var(--color-text-tertiary); }
+
+/* ── CosyVoice 模型缓存面板 ──────────────────────────────────────────── */
+.models-panel {
+  margin-top: var(--space-4);
+  background: var(--color-bg-hover);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.models-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.models-panel-title {
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--color-text-primary);
+  margin-bottom: var(--space-1);
+}
+.models-panel-desc {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  line-height: 1.6;
+}
+.models-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.model-cache-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+}
+.model-cache-name {
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  color: var(--color-text-secondary);
+}
+.model-cache-badge {
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  border: 1px solid;
+}
+.model-cache-badge.cached  { background: rgba(39,174,96,0.1);  border-color: rgba(39,174,96,0.4);  color: #1e9e5c; }
+.model-cache-badge.missing { background: rgba(192,57,43,0.1);  border-color: rgba(192,57,43,0.4);  color: #a93226; }
+.models-update-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.models-update-hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+.models-update-result {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  border: 1px solid;
+}
+.models-update-result.success { background: rgba(39,174,96,0.08); border-color: rgba(39,174,96,0.3); color: #1e9e5c; }
+.models-update-result.partial { background: rgba(243,156,18,0.08); border-color: rgba(243,156,18,0.3); color: #d68910; }
+.models-update-result.error   { background: rgba(192,57,43,0.08); border-color: rgba(192,57,43,0.3); color: #a93226; }
 </style>

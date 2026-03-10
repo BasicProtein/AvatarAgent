@@ -33,12 +33,12 @@ const previewDescription = computed(() => {
 const videoSrc = computed(() => {
   const path = pipeline.finalVideoPath || pipeline.avatarVideoPath
   if (!path) return ''
-  return `http://localhost:8000/output/${path.split(/[/\\]/).pop()}`
+  return `/output/${path.split(/[/\\]/).pop()}`
 })
 
 const coverSrc = computed(() => {
   if (!pipeline.coverPath) return ''
-  return `http://localhost:8000/output/${pipeline.coverPath.split(/[/\\]/).pop()}`
+  return `/output/${pipeline.coverPath.split(/[/\\]/).pop()}`
 })
 </script>
 

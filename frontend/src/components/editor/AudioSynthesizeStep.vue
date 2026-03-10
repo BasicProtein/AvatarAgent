@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { usePipelineStore } from '../../stores/pipeline'
-import { audioApi, type VoiceItem } from '../../api/audio'
+import { audioApi, synthesizeStream, type VoiceItem } from '../../api/audio'
 import { ElMessage } from 'element-plus'
 
 const pipeline = usePipelineStore()
@@ -10,11 +10,38 @@ const selectedVoice = ref(0)
 const speed = ref(1.0)
 const audioUrl = ref('')   // 浏览器本地播放 URL（Blob 或 /output/ 路径）
 
+const logs = ref<string[]>([])
+const logBoxRef = ref<HTMLElement | null>(null)
+
+function revokeAudioUrl(url: string) {
+  if (url.startsWith('blob:')) {
+    URL.revokeObjectURL(url)
+  }
+}
+
+function appendLog(msg: string) {
+  const now = new Date()
+  const ts = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+  logs.value.push(`[${ts}] ${msg}`)
+  nextTick(() => {
+    if (logBoxRef.value) {
+      logBoxRef.value.scrollTop = logBoxRef.value.scrollHeight
+    }
+  })
+}
+
+let abortController: AbortController | null = null
+
 onMounted(async () => {
   try {
     const res = await audioApi.listVoices()
     voices.value = res.data
   } catch { /* ignore */ }
+})
+
+onBeforeUnmount(() => {
+  revokeAudioUrl(audioUrl.value)
+  abortController?.abort()
 })
 
 async function handleSynthesize() {
@@ -23,31 +50,63 @@ async function handleSynthesize() {
     ElMessage.warning('请先完成文案步骤')
     return
   }
+
+  logs.value = []
+  abortController?.abort()
+  abortController = new AbortController()
+
   pipeline.setStepLoading('synthesize', true)
+  appendLog('开始语音合成...')
+
   try {
-    // 调用 /synthesize/path — 返回 JSON，包含服务端绝对路径
-    const res = await audioApi.synthesizePath({
-      text,
-      voice_id: selectedVoice.value,
-      speed: speed.value,
-    })
+    let resultAudioPath = ''
+    let resultAudioUrl = ''
+    let hasError = false
+
+    await synthesizeStream(
+      { text, voice_id: selectedVoice.value, speed: speed.value },
+      (event) => {
+        if (event.type === 'log') {
+          appendLog(event.message)
+        } else if (event.type === 'result') {
+          resultAudioPath = event.audio_path
+          resultAudioUrl = event.audio_url
+          appendLog('✓ 合成成功！')
+        } else if (event.type === 'error') {
+          hasError = true
+          appendLog(`✗ 错误：${event.message}`)
+        }
+      },
+      abortController.signal,
+    )
+
+    if (hasError || !resultAudioPath) {
+      throw new Error('语音合成失败，请查看日志')
+    }
 
     // 存入 pipeline：供数字人步骤使用的服务端绝对路径
-    pipeline.audioPath = res.data.audio_path
+    pipeline.audioPath = resultAudioPath
 
-    // 构造浏览器可播放的 URL（/output/... 静态路径）
-    audioUrl.value = res.data.audio_url || ''
+    // 构造浏览器可播放的 URL
+    revokeAudioUrl(audioUrl.value)
+    if (resultAudioUrl) {
+      try {
+        const previewRes = await audioApi.fetchAudioBlob(resultAudioPath)
+        audioUrl.value = URL.createObjectURL(new Blob([previewRes.data], { type: 'audio/wav' }))
+      } catch {
+        audioUrl.value = resultAudioUrl
+      }
+    } else {
+      audioUrl.value = ''
+    }
 
-    pipeline.completeStep('synthesize', { audio_path: res.data.audio_path })
+    pipeline.completeStep('synthesize', { audio_path: resultAudioPath })
     pipeline.setActiveStep('avatar')
     ElMessage.success('语音合成成功')
   } catch (e: unknown) {
-    const msg =
-      typeof e === 'object' && e !== null && 'response' in e
-        ? (e as { response?: { data?: { detail?: string } } }).response?.data?.detail || (e as Error).message
-        : e instanceof Error
-          ? e.message
-          : '语音合成失败'
+    if ((e as { name?: string })?.name === 'AbortError') return
+    const msg = e instanceof Error ? e.message : '语音合成失败'
+    appendLog(`✗ ${msg}`)
     ElMessage.error(msg)
   } finally {
     pipeline.setStepLoading('synthesize', false)
@@ -86,6 +145,13 @@ async function handleSynthesize() {
     >
       {{ pipeline.steps.synthesize.loading ? '合成中...' : '开始合成' }}
     </el-button>
+
+    <div v-if="logs.length > 0" class="synth-log">
+      <p class="result-label">合成日志</p>
+      <div ref="logBoxRef" class="log-box">
+        <p v-for="(line, i) in logs" :key="i" class="log-line">{{ line }}</p>
+      </div>
+    </div>
 
     <div v-if="audioUrl" class="audio-preview">
       <p class="result-label">合成结果</p>
@@ -126,6 +192,30 @@ async function handleSynthesize() {
 .action-btn {
   align-self: flex-start;
   padding: 0 var(--space-6) !important;
+}
+
+.synth-log {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: rgba(250, 249, 245, 0.6);
+}
+
+.log-box {
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.log-line {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  line-height: 1.6;
+  word-break: break-all;
+  margin: 0;
 }
 
 .audio-preview {

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.api.schemas.models import ApiKeyRequest
@@ -165,4 +165,51 @@ async def set_cosyvoice_runtime(req: CosyVoiceRuntimeConfig):
         "status": "success",
         "device": device,
         "message": "CosyVoice 运行设置已保存，重启服务后生效。",
+    }
+
+
+@router.post("/cosyvoice-runtime/restart")
+async def restart_cosyvoice_runtime():
+    from src.audio.cosyvoice_deploy import restart_cosyvoice
+
+    result = restart_cosyvoice()
+    if result.get("status") != "success":
+        raise HTTPException(status_code=500, detail=result.get("message", "CosyVoice 重启失败"))
+    return result
+
+
+@router.post("/cosyvoice-models/update")
+async def update_cosyvoice_models():
+    """手动触发 CosyVoice 模型联网更新。
+
+    仅在用户主动点击"更新模型"按钮时调用，平时 CosyVoice 以离线模式运行。
+    所有模型下载到项目内的 third_party/models/modelscope_cache，不写入 C 盘。
+    """
+    import asyncio
+    from src.audio.cosyvoice_deploy import update_cosyvoice_models
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, update_cosyvoice_models)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=result.get("message", "模型更新失败"))
+    return result
+
+
+@router.get("/cosyvoice-models/status")
+async def cosyvoice_models_status():
+    """检查 CosyVoice 所需模型是否已在本地项目缓存中就绪。"""
+    from pathlib import Path
+
+    cache_dir = Path(__file__).parent.parent.parent.parent / "third_party" / "models" / "modelscope_cache" / "hub"
+    models = {
+        "iic/CosyVoice2-0.5B": (cache_dir / "iic" / "CosyVoice2-0___5B").exists(),
+        "pengzhendong/wetext": (cache_dir / "pengzhendong" / "wetext").exists(),
+    }
+    all_ready = all(models.values())
+    return {
+        "all_ready": all_ready,
+        "models": [
+            {"name": name, "cached": cached}
+            for name, cached in models.items()
+        ],
     }

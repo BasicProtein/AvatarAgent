@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -175,6 +176,11 @@ class ScriptExtractor:
                 try:
                     return self._download_via_playwright(url)
                 except Exception as e:
+                    if isinstance(e, ScriptExtractError) and any(
+                        token in str(e)
+                        for token in ("作品不见了", "无法观看", "不可访问")
+                    ):
+                        raise
                     logger.warning(f"[层1] Playwright 失败: {e}")
 
                 # 层 2：douyin-tiktok-scraper 本地库
@@ -338,21 +344,36 @@ class ScriptExtractor:
 
         return None
 
+    def _extract_douyin_video_id_from_text(self, text: str) -> Optional[str]:
+        """从任意文本中提取抖音视频 ID。"""
+        match = re.search(r"/video/(\d+)", text)
+        if match:
+            return match.group(1)
+        return None
+
+    def _build_douyin_filter_error(self, filter_detail: dict) -> ScriptExtractError:
+        """将抖音网页返回的过滤信息转成可读错误。"""
+        notice = str(filter_detail.get("notice") or "").strip()
+        detail_msg = str(filter_detail.get("detail_msg") or "").strip()
+        if notice and detail_msg and detail_msg != notice:
+            return ScriptExtractError(f"{notice}：{detail_msg}")
+        if detail_msg:
+            return ScriptExtractError(detail_msg)
+        if notice:
+            return ScriptExtractError(notice)
+        return ScriptExtractError("抖音视频不可访问")
+
     # ──────────────── 层 0：Playwright 浏览器渲染（最可靠）─────────────────
 
     def _download_via_playwright(self, url: str) -> str:
-        """通过 Playwright 浏览器加载抖音分享页，捕获视频流地址并下载
+        """通过 Playwright 浏览器完成短链解析并尝试提取视频地址。
 
-        使用移动端分享页（iesdouyin.com），自动点击播放按钮触发视频加载，
-        通过网络拦截获取真实视频 URL。
+        先在桌面端页面中截取 aweme/detail 接口响应，以获取更准确的权限状态；
+        若可继续播放，再回到移动端分享页触发视频加载并抓取真实视频 URL。
 
         Returns:
             本地音频/视频文件路径
         """
-        video_id = self._extract_douyin_video_id(url)
-        if not video_id:
-            raise ScriptExtractError("无法从链接中提取抖音视频 ID")
-
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -361,16 +382,16 @@ class ScriptExtractor:
         if loop and loop.is_running():
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(self._run_playwright_sync, video_id).result()
+                return pool.submit(self._run_playwright_sync, url).result()
         else:
-            return self._run_playwright_sync(video_id)
+            return self._run_playwright_sync(url)
 
     def _extract_douyin_video_id(self, url: str) -> Optional[str]:
         """从抖音链接中提取视频 ID（支持短链和长链）"""
         # 长链：https://www.douyin.com/video/7614160296634027306
-        match = re.search(r"video/(\d+)", url)
-        if match:
-            return match.group(1)
+        video_id = self._extract_douyin_video_id_from_text(url)
+        if video_id:
+            return video_id
 
         # 短链需要先解析重定向获取真实 URL
         try:
@@ -378,68 +399,130 @@ class ScriptExtractor:
                 resp = client.get(url, headers={
                     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X)"
                 })
-                match = re.search(r"video/(\d+)", str(resp.url))
-                if match:
-                    return match.group(1)
+                video_id = self._extract_douyin_video_id_from_text(str(resp.url))
+                if video_id:
+                    return video_id
         except Exception as e:
             logger.warning(f"解析抖音短链失败: {e}")
 
         return None
 
-    def _run_playwright_sync(self, video_id: str) -> str:
+    def _run_playwright_sync(self, url: str) -> str:
         """在新事件循环中运行 Playwright 抓取视频"""
 
         async def _inner():
             from playwright.async_api import async_playwright
 
             video_urls: list[str] = []
-            share_url = f"https://www.iesdouyin.com/share/video/{video_id}/"
+            filter_details: list[dict] = []
+            aweme_details: list[dict] = []
+            response_tasks: list[asyncio.Task] = []
 
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
-                        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                        "Version/16.6 Mobile/15E148 Safari/604.1"
-                    ),
-                    viewport={"width": 375, "height": 812},
-                    is_mobile=True,
-                )
-                page = await context.new_page()
+                try:
+                    page = await browser.new_page()
 
-                async def on_response(response):
-                    ct = response.headers.get("content-type", "")
-                    if "video" in ct:
-                        video_urls.append(response.url)
+                    async def capture_aweme_detail(response):
+                        try:
+                            data = await response.json()
+                        except Exception as e:
+                            logger.warning(f"Playwright 解析 aweme/detail 响应失败: {e}")
+                            return
 
-                page.on("response", on_response)
+                        detail = data.get("aweme_detail")
+                        if isinstance(detail, dict) and detail:
+                            aweme_details.append(detail)
 
-                await page.goto(share_url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(3000)
+                        filter_detail = data.get("filter_detail")
+                        if isinstance(filter_detail, dict) and filter_detail:
+                            filter_details.append(filter_detail)
 
-                # 点击播放按钮触发视频加载
-                play_btn = await page.query_selector(
-                    ".play-btn, [class*=play], .video-container"
-                )
-                if play_btn:
-                    await play_btn.click()
-                else:
-                    await page.click("body", position={"x": 187, "y": 300})
-                await page.wait_for_timeout(5000)
+                    def on_desktop_response(response):
+                        if "aweme/v1/web/aweme/detail/" in response.url:
+                            response_tasks.append(
+                                asyncio.create_task(capture_aweme_detail(response))
+                            )
 
-                # 如果网络拦截没有捕获，尝试从 video 元素获取
-                if not video_urls:
-                    src = await page.evaluate("""() => {
-                        const v = document.querySelector('video');
-                        return v ? (v.src || v.currentSrc) : null;
-                    }""")
-                    if src and src.startswith("http"):
-                        video_urls.append(src)
+                    page.on("response", on_desktop_response)
+                    await page.goto(url, wait_until="commit", timeout=30000)
+                    await page.wait_for_timeout(5000)
+                    if response_tasks:
+                        await asyncio.gather(*response_tasks, return_exceptions=True)
 
-                await browser.close()
+                    for detail in aweme_details:
+                        video_url = self._pick_video_url(detail.get("video") or {})
+                        if video_url:
+                            return video_url
+
+                    video_id = (
+                        self._extract_douyin_video_id_from_text(page.url)
+                        or self._extract_douyin_video_id_from_text(url)
+                    )
+                    if not video_id:
+                        raise ScriptExtractError("无法从链接中提取抖音视频 ID")
+
+                    mobile_context = await browser.new_context(
+                        user_agent=(
+                            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
+                            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                            "Version/16.6 Mobile/15E148 Safari/604.1"
+                        ),
+                        viewport={"width": 375, "height": 812},
+                        is_mobile=True,
+                    )
+                    try:
+                        mobile_page = await mobile_context.new_page()
+
+                        def on_mobile_response(response):
+                            ct = response.headers.get("content-type", "")
+                            if "video" in ct:
+                                video_urls.append(response.url)
+
+                        mobile_page.on("response", on_mobile_response)
+
+                        share_url = f"https://www.iesdouyin.com/share/video/{video_id}/"
+                        await mobile_page.goto(
+                            share_url,
+                            wait_until="commit",
+                            timeout=30000,
+                        )
+                        await mobile_page.wait_for_timeout(3000)
+
+                        body_text = (await mobile_page.locator("body").inner_text()).strip()
+                        if "作品不见了" in body_text and "无法观看" in body_text:
+                            raise ScriptExtractError(
+                                "抱歉，作品不见了：因作品权限或已被删除，无法观看，去看看其他作品吧"
+                            )
+
+                        play_btn = await mobile_page.query_selector(
+                            ".play-btn, [class*=play], .video-container, video"
+                        )
+                        with contextlib.suppress(Exception):
+                            if play_btn:
+                                await play_btn.click()
+                            else:
+                                await mobile_page.click(
+                                    "body",
+                                    position={"x": 187, "y": 300},
+                                )
+                        await mobile_page.wait_for_timeout(5000)
+
+                        if not video_urls:
+                            src = await mobile_page.evaluate("""() => {
+                                const v = document.querySelector('video');
+                                return v ? (v.src || v.currentSrc) : null;
+                            }""")
+                            if src and src.startswith("http"):
+                                video_urls.append(src)
+                    finally:
+                        await mobile_context.close()
+                finally:
+                    await browser.close()
 
             if not video_urls:
+                if filter_details:
+                    raise self._build_douyin_filter_error(filter_details[-1])
                 raise ScriptExtractError("Playwright 未能捕获到视频流地址")
             return video_urls[0]
 
@@ -681,15 +764,30 @@ class ScriptExtractor:
         """
         output_path = str(self._temp_dir / generate_unique_filename("wav", "audio"))
 
-        cmd = [
-            "yt-dlp",
+        ytdlp_bin = shutil.which("yt-dlp")
+        if ytdlp_bin:
+            cmd = [ytdlp_bin]
+        else:
+            try:
+                import yt_dlp  # noqa: F401
+            except ImportError as e:
+                raise ScriptExtractError(
+                    "未找到 yt-dlp。请将 yt-dlp 加入 PATH，或在当前 Python 环境中安装 yt_dlp。"
+                ) from e
+            cmd = [
+                sys.executable,
+                "-m",
+                "yt_dlp",
+            ]
+
+        cmd.extend([
             "--extract-audio",
             "--audio-format", "wav",
             "--audio-quality", "0",
             "--no-playlist",
             "-o", output_path,
             url,
-        ]
+        ])
 
         try:
             result = subprocess.run(
@@ -699,7 +797,8 @@ class ScriptExtractor:
                 timeout=180,
             )
             if result.returncode != 0:
-                raise ScriptExtractError(f"yt-dlp 下载失败: {result.stderr[:300]}")
+                error_output = (result.stderr or result.stdout or "").strip()
+                raise ScriptExtractError(f"yt-dlp 下载失败: {error_output[:300]}")
 
             # yt-dlp 可能自动修改扩展名（如 wav → m4a），搜索实际文件
             possible_path = Path(output_path)
@@ -712,6 +811,10 @@ class ScriptExtractor:
 
             raise ScriptExtractError("yt-dlp 下载完成但未找到音频文件")
 
+        except FileNotFoundError as e:
+            raise ScriptExtractError(
+                f"yt-dlp 不可用: {e.filename or cmd[0]}"
+            ) from e
         except subprocess.TimeoutExpired:
             raise ScriptExtractError("yt-dlp 下载超时（超过 180 秒）")
 
