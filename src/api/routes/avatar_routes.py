@@ -1,10 +1,12 @@
 """数字人路由"""
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse
 
 from src.api.schemas.models import (
     AvatarGenerateRequest,
@@ -14,6 +16,7 @@ from src.api.schemas.models import (
 )
 from src.avatar.heygem import HeyGemEngine, TuiliONNXEngine, MODELS_DIR
 from src.common.config_manager import ConfigManager
+from src.common.exceptions import AvatarGenerateError
 from src.common.file_utils import ensure_dir
 from src.common.logger import get_logger
 
@@ -152,7 +155,7 @@ async def delete_avatar(avatar_name: str):
 
 @router.post("/generate")
 async def generate_avatar(req: AvatarGenerateRequest):
-    """生成数字人视频"""
+    """生成数字人视频（同步，等待完成后返回）"""
     if req.engine == "heygem":
         engine = HeyGemEngine()
         result = await engine.generate(
@@ -174,6 +177,75 @@ async def generate_avatar(req: AvatarGenerateRequest):
             add_watermark=req.add_watermark,
         )
     return result
+
+
+@router.post("/generate/stream")
+async def generate_avatar_stream(req: AvatarGenerateRequest):
+    """生成数字人视频 — SSE 流式返回进度日志 + 最终结果。
+
+    事件格式：
+      data: {"type": "log", "message": "..."}
+      data: {"type": "result", "video_path": "..."}
+      data: {"type": "error", "message": "..."}
+    """
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def on_progress(msg: str) -> None:
+        queue.put_nowait(json.dumps({"type": "log", "message": msg}, ensure_ascii=False))
+
+    async def run_generation() -> None:
+        try:
+            if req.engine == "heygem":
+                engine = HeyGemEngine()
+                result = await engine.generate(
+                    model_name=req.model_name,
+                    audio_path=req.audio_path,
+                    add_watermark=req.add_watermark,
+                    on_progress=on_progress,
+                )
+            else:
+                engine = TuiliONNXEngine()
+                result = await engine.generate(
+                    face_id=req.model_name,
+                    audio_path=req.audio_path,
+                    batch_size=req.batch_size,
+                    sync_offset=req.sync_offset,
+                    scale_h=req.scale_h,
+                    scale_w=req.scale_w,
+                    compress_inference=req.compress_inference,
+                    beautify_teeth=req.beautify_teeth,
+                    add_watermark=req.add_watermark,
+                )
+            queue.put_nowait(json.dumps(
+                {"type": "result", **result},
+                ensure_ascii=False,
+            ))
+        except AvatarGenerateError as e:
+            queue.put_nowait(json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False))
+        except Exception as e:
+            queue.put_nowait(json.dumps({"type": "error", "message": f"生成失败: {e}"}, ensure_ascii=False))
+        finally:
+            queue.put_nowait(None)
+
+    async def event_generator():
+        task = asyncio.create_task(run_generation())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield f"data: {item}\n\n"
+        finally:
+            task.cancel()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ─────────────────────────────── 服务状态 ────────────────────────────────

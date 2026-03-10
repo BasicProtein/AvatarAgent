@@ -127,6 +127,24 @@ class ConfigManager:
         port = self.get("heygem", "port", "8383")
         return f"http://{host}:{port}"
 
+    def get_heygem_path_mapping(self) -> dict:
+        """获取 HeyGem Docker volume 路径映射配置。
+
+        Returns:
+            {
+                "audio_host_dir": str,       # 宿主机音频目录（空表示不映射）
+                "audio_container_dir": str,  # 容器内音频挂载目录
+                "video_host_dir": str,       # 宿主机视频目录（空表示不映射）
+                "video_container_dir": str,  # 容器内视频挂载目录
+            }
+        """
+        return {
+            "audio_host_dir": self.get("heygem", "audio_host_dir", "").strip(),
+            "audio_container_dir": self.get("heygem", "audio_container_dir", "/heygem_data/voice/data").strip(),
+            "video_host_dir": self.get("heygem", "video_host_dir", "").strip(),
+            "video_container_dir": self.get("heygem", "video_container_dir", "/heygem_data/face2face").strip(),
+        }
+
     def get_tuilionnx_url(self) -> str:
         host = self.get("tuilionnx", "host", "127.0.0.1")
         port = self.get("tuilionnx", "port", "8384")

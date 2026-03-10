@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useConfigStore } from '../stores/config'
-import { configApi, type CloudGpuConfig, type CosyVoiceRuntimeStatus, type LocalAsrStatus, type CosyVoiceModelsStatus } from '../api/config'
+import { configApi, type CloudGpuConfig, type CosyVoiceRuntimeStatus, type LocalAsrStatus, type CosyVoiceModelsStatus, type HeyGemPathConfig } from '../api/config'
 import { ElMessage } from 'element-plus'
 
 const configStore = useConfigStore()
@@ -61,6 +61,8 @@ onMounted(async () => {
     const res = await configApi.getCloudGpu()
     cloudGpu.value = res.data
   } catch { /* 忽略 */ }
+  // 加载 HeyGem 路径配置
+  await loadHeygemPaths()
   // 加载本地 ASR 状态
   await refreshCosyVoiceRuntime()
   await refreshLocalAsr()
@@ -190,6 +192,34 @@ async function removeKey(key: string) {
     ElMessage.success('已删除')
   } catch {
     ElMessage.error('删除失败')
+  }
+}
+
+// ── HeyGem 路径映射 ────────────────────────────────────────────────────────
+const heygemPaths = ref<HeyGemPathConfig>({
+  audio_host_dir: '',
+  audio_container_dir: '/heygem_data/voice/data',
+  video_host_dir: '',
+  video_container_dir: '/heygem_data/face2face',
+})
+const heygemPathsSaving = ref(false)
+
+async function loadHeygemPaths() {
+  try {
+    const res = await configApi.getHeygemPaths()
+    heygemPaths.value = res.data
+  } catch { /* 忽略 */ }
+}
+
+async function saveHeygemPaths() {
+  heygemPathsSaving.value = true
+  try {
+    await configApi.setHeygemPaths(heygemPaths.value)
+    ElMessage.success('HeyGem 路径配置已保存')
+  } catch {
+    ElMessage.error('保存失败')
+  } finally {
+    heygemPathsSaving.value = false
   }
 }
 
@@ -566,6 +596,70 @@ async function testCloudGpu() {
       </div>
     </div>
 
+    <!-- HeyGem Docker 路径配置 -->
+    <div class="settings-section">
+      <h2 class="section-title">数字人（HeyGem）路径配置</h2>
+      <p class="section-desc">
+        HeyGem 服务运行在 Docker 容器内，通过 volume 挂载访问文件。<br />
+        需将宿主机目录与容器内挂载路径对应，否则提交任务时会返回 404。<br />
+        可执行 <code>docker inspect heygem-gen-video</code> 查看实际挂载配置。
+      </p>
+
+      <div class="heygem-path-panel">
+        <div class="heygem-path-group">
+          <p class="heygem-path-group-title">音频文件路径映射</p>
+          <div class="field-row">
+            <label class="field-label">宿主机音频目录</label>
+            <el-input
+              v-model="heygemPaths.audio_host_dir"
+              placeholder="例：E:\Software\VideoAgent\AvatarAgent\output"
+              size="large"
+              clearable
+            />
+            <p class="field-hint">音频文件（.wav）所在的宿主机目录前缀，留空则不做路径转换</p>
+          </div>
+          <div class="field-row">
+            <label class="field-label">容器内挂载路径</label>
+            <el-input
+              v-model="heygemPaths.audio_container_dir"
+              placeholder="/heygem_data/voice/data"
+              size="large"
+            />
+            <p class="field-hint">对应容器内的挂载目录（通常为 <code>/heygem_data/voice/data</code>）</p>
+          </div>
+        </div>
+
+        <div class="heygem-path-divider" />
+
+        <div class="heygem-path-group">
+          <p class="heygem-path-group-title">视频/模型文件路径映射</p>
+          <div class="field-row">
+            <label class="field-label">宿主机视频目录</label>
+            <el-input
+              v-model="heygemPaths.video_host_dir"
+              placeholder="例：E:\Software\VideoAgent\AvatarAgent\resources\models"
+              size="large"
+              clearable
+            />
+            <p class="field-hint">数字人模型视频文件所在的宿主机目录前缀，留空则不做路径转换</p>
+          </div>
+          <div class="field-row">
+            <label class="field-label">容器内挂载路径</label>
+            <el-input
+              v-model="heygemPaths.video_container_dir"
+              placeholder="/heygem_data/face2face"
+              size="large"
+            />
+            <p class="field-hint">对应容器内的挂载目录（通常为 <code>/heygem_data/face2face</code>）</p>
+          </div>
+        </div>
+
+        <el-button type="primary" :loading="heygemPathsSaving" @click="saveHeygemPaths">
+          保存路径配置
+        </el-button>
+      </div>
+    </div>
+
     <!-- Services -->
     <div class="settings-section">
       <h2 class="section-title">服务状态</h2>
@@ -797,4 +891,25 @@ code.cmd {
 .models-update-result.success { background: rgba(39,174,96,0.08); border-color: rgba(39,174,96,0.3); color: #1e9e5c; }
 .models-update-result.partial { background: rgba(243,156,18,0.08); border-color: rgba(243,156,18,0.3); color: #d68910; }
 .models-update-result.error   { background: rgba(192,57,43,0.08); border-color: rgba(192,57,43,0.3); color: #a93226; }
+
+/* ── HeyGem 路径配置面板 ───────────────────────────────────────────────── */
+.heygem-path-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.heygem-path-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.heygem-path-group-title {
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--color-text-primary);
+}
+.heygem-path-divider {
+  height: 1px;
+  background: var(--color-border-light);
+}
 </style>

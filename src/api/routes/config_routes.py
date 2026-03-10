@@ -195,6 +195,31 @@ async def update_cosyvoice_models():
     return result
 
 
+class HeyGemPathConfig(BaseModel):
+    audio_host_dir: Optional[str] = ""
+    audio_container_dir: Optional[str] = "/heygem_data/voice/data"
+    video_host_dir: Optional[str] = ""
+    video_container_dir: Optional[str] = "/heygem_data/face2face"
+
+
+@router.get("/heygem-paths")
+async def get_heygem_paths():
+    """获取 HeyGem Docker volume 路径映射配置"""
+    mapping = config.get_heygem_path_mapping()
+    return mapping
+
+
+@router.post("/heygem-paths")
+async def set_heygem_paths(req: HeyGemPathConfig):
+    """保存 HeyGem Docker volume 路径映射配置"""
+    config.set("heygem", "audio_host_dir", req.audio_host_dir or "")
+    config.set("heygem", "audio_container_dir", req.audio_container_dir or "/heygem_data/voice/data")
+    config.set("heygem", "video_host_dir", req.video_host_dir or "")
+    config.set("heygem", "video_container_dir", req.video_container_dir or "/heygem_data/face2face")
+    config.reload()
+    return {"status": "success", "message": "HeyGem 路径配置已保存"}
+
+
 @router.get("/cosyvoice-models/status")
 async def cosyvoice_models_status():
     """检查 CosyVoice 所需模型是否已在本地项目缓存中就绪。"""
