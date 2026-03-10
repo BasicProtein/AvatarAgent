@@ -37,7 +37,7 @@ const statusClass = computed(() => {
 </script>
 
 <template>
-  <div class="step-card" :class="{ expanded: isExpanded, active: props.active }">
+  <div class="step-card" :class="{ expanded: isExpanded, active: props.active, 'is-loading': props.loading }">
     <div class="step-header" @click="toggle">
       <div class="step-number" :class="statusClass">
         <el-icon v-if="props.completed" :size="14"><Check /></el-icon>
@@ -62,11 +62,51 @@ const statusClass = computed(() => {
 
 <style scoped>
 .step-card {
+  position: relative;
   background: var(--color-bg-card);
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-lg);
   transition: all var(--duration-normal) var(--ease-out);
   overflow: hidden;
+}
+
+.step-card.is-loading {
+  border-color: transparent !important;
+}
+
+.step-card.is-loading::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 250%;
+  height: 250%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0%,
+    transparent 50%,
+    var(--color-primary-lighter) 80%,
+    var(--color-primary) 100%
+  );
+  transform: translate(-50%, -50%);
+  animation: border-neon-spin 2.5s linear infinite;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.step-card.is-loading::after {
+  content: '';
+  position: absolute;
+  inset: 1.5px;
+  background: var(--color-bg-card);
+  border-radius: calc(var(--radius-lg) - 1.5px);
+  z-index: 0;
+  pointer-events: none;
+}
+
+@keyframes border-neon-spin {
+  0% { transform: translate(-50%, -50%) rotate(0deg); }
+  100% { transform: translate(-50%, -50%) rotate(360deg); }
 }
 
 .step-card:hover {
@@ -80,12 +120,14 @@ const statusClass = computed(() => {
 }
 
 .step-header {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-4) var(--space-5);
   cursor: pointer;
   transition: background-color var(--duration-fast);
+  z-index: 1;
 }
 
 .step-header:hover {
@@ -147,7 +189,9 @@ const statusClass = computed(() => {
 }
 
 .step-body {
+  position: relative;
   padding: 0 var(--space-5) var(--space-5);
+  z-index: 1;
 }
 
 .spin {
