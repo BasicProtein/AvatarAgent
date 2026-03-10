@@ -384,9 +384,12 @@ def start_cosyvoice(port: int = 50000, device: str | None = None) -> subprocess.
     cache_dir = PROJECT_ROOT / "third_party" / "models" / "modelscope_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     env["MODELSCOPE_CACHE"] = str(cache_dir)
-    # 禁止 CosyVoice 在每次推理时自动联网检查/下载模型
-    # 用户需要手动触发更新（通过设置页面的"更新模型"按钮）
+    # 禁止联网检查/下载模型；同时清除系统代理，防止 wetext/modelscope 尝试走代理联网
     env["MODELSCOPE_OFFLINE"] = "1"
+    for proxy_key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]:
+        env.pop(proxy_key, None)
+    env["NO_PROXY"] = "*"
+    env["no_proxy"] = "*"
     if device_policy == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = "-1"
     else:
