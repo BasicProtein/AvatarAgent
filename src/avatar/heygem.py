@@ -162,7 +162,7 @@ class HeyGemEngine:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, transport=httpx.AsyncHTTPTransport()) as client:
                 resp = await client.post(
                     f"{self.base_url}/easy/submit",
                     json=payload,
@@ -181,7 +181,7 @@ class HeyGemEngine:
         # 轮询任务状态
         elapsed = 0.0
         output_video_path = ""
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=15.0, transport=httpx.AsyncHTTPTransport()) as client:
             while elapsed < _POLL_TIMEOUT:
                 await asyncio.sleep(_POLL_INTERVAL)
                 elapsed += _POLL_INTERVAL
@@ -214,13 +214,22 @@ class HeyGemEngine:
         if not output_video_path:
             raise AvatarGenerateError("HeyGem 生成超时或未返回视频路径")
 
+        # 将容器内路径 /code/data/temp/xxx.mp4 转换为宿主机路径
+        # 容器的 /code/data/temp 已挂载到 output/avatar/
+        container_temp = "/code/data/temp"
+        avatar_host_dir = str(self.config.get_output_dir() / "avatar")
+        if output_video_path.startswith(container_temp):
+            filename = output_video_path[len(container_temp):].lstrip("/")
+            output_video_path = str(Path(avatar_host_dir) / filename)
+            _log(f"[HeyGem] 结果路径映射: {inner.get('result','')} → {output_video_path}")
+
         _log(f"[HeyGem] 视频生成完成: {output_video_path}")
         return {"video_path": output_video_path}
 
     async def check_service(self) -> bool:
         """检查 HeyGem 服务是否可用"""
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, transport=httpx.AsyncHTTPTransport()) as client:
                 # HeyGem 无专用 health 端点，用 query 探测服务连通性
                 response = await client.get(
                     f"{self.base_url}/easy/query",
@@ -251,7 +260,7 @@ class TuiliONNXEngine:
         # 通过 API 从 TuiliONNX 服务获取
         try:
             import httpx as _httpx
-            with _httpx.Client(timeout=10.0) as client:
+            with _httpx.Client(timeout=10.0, transport=_httpx.HTTPTransport()) as client:
                 response = client.get(f"{self.base_url}/api/faces")
                 response.raise_for_status()
                 return response.json().get("faces", [])
@@ -298,7 +307,7 @@ class TuiliONNXEngine:
             output_dir = self.config.get_output_dir() / "avatar"
             ensure_dir(output_dir)
 
-            async with httpx.AsyncClient(timeout=600.0) as client:
+            async with httpx.AsyncClient(timeout=600.0, transport=httpx.AsyncHTTPTransport()) as client:
                 with open(audio_path, "rb") as af:
                     files = {"audio": (Path(audio_path).name, af)}
                     data = {
@@ -343,7 +352,7 @@ class TuiliONNXEngine:
     async def check_service(self) -> bool:
         """检查 TuiliONNX 服务是否可用"""
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, transport=httpx.AsyncHTTPTransport()) as client:
                 response = await client.get(f"{self.base_url}/health")
                 return response.status_code == 200
         except Exception:
