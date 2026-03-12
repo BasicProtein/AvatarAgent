@@ -20,6 +20,21 @@ const outlineColor = ref('#000000')
 const selectedBgm = ref('')
 const bgmVolume = ref(0.5)
 const skipBgm = ref(false)
+const bgmUploading = ref(false)
+
+async function handleBgmUpload(file: File) {
+  bgmUploading.value = true
+  try {
+    const res = await videoApi.uploadBgm(file)
+    bgmList.value.push({ name: res.data.name, path: res.data.path })
+    selectedBgm.value = res.data.name
+    ElMessage.success(`BGM "${res.data.name}" 上传成功`)
+  } catch {
+    ElMessage.error('BGM 上传失败')
+  } finally {
+    bgmUploading.value = false
+  }
+}
 
 // Cover settings
 const coverText = ref('')
@@ -96,6 +111,7 @@ async function handlePostProd() {
     const coverRes = await videoApi.generateCover({
       video_path: currentVideo,
       text: coverText.value,
+      script_text: pipeline.rewrittenText || pipeline.extractedText,
       use_ai: useAiCover.value,
       api_key: apiKey.value,
     })
@@ -157,9 +173,18 @@ async function handlePostProd() {
       <el-checkbox v-model="skipBgm">不添加 BGM</el-checkbox>
       <template v-if="!skipBgm">
         <div class="field">
-          <el-select v-model="selectedBgm" placeholder="随机选择" clearable style="width: 100%;" size="default">
-            <el-option v-for="b in bgmList" :key="b.name" :label="b.name" :value="b.name" />
-          </el-select>
+          <div class="bgm-select-row">
+            <el-select v-model="selectedBgm" placeholder="随机选择" clearable style="flex: 1;" size="default">
+              <el-option v-for="b in bgmList" :key="b.name" :label="b.name" :value="b.name" />
+            </el-select>
+            <el-upload
+              :show-file-list="false"
+              accept=".mp3,.wav,.flac,.aac,.m4a"
+              :before-upload="(file: File) => { handleBgmUpload(file); return false }"
+            >
+              <el-button size="default" :loading="bgmUploading" plain>上传</el-button>
+            </el-upload>
+          </div>
         </div>
         <div class="field">
           <p class="field-label">音量 ({{ (bgmVolume * 100).toFixed(0) }}%)</p>
@@ -249,6 +274,12 @@ async function handlePostProd() {
   color: var(--color-text-secondary);
   font-weight: var(--font-medium);
   margin-bottom: var(--space-1);
+}
+
+.bgm-select-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
 }
 
 .action-btn {

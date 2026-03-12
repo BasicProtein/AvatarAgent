@@ -52,17 +52,17 @@ class SubtitleGenerator:
 
     async def generate_srt(
         self,
-        audio_path: str,
+        video_path: str,
         text: str = "",
         api_key: str = "",
     ) -> str:
         """生成 SRT 字幕文件
 
-        如果提供了 text，则基于文本和音频时间轴生成字幕。
-        如果未提供 text，则使用 ASR 从音频识别。
+        如果提供了 text，则基于文本和视频时长生成字幕。
+        如果未提供 text，则先从视频提取音频，再使用 ASR 识别。
 
         Args:
-            audio_path: 音频文件路径
+            video_path: 视频文件路径
             text: 口播文案文本（可选）
             api_key: API Key（用于 ASR）
 
@@ -72,8 +72,9 @@ class SubtitleGenerator:
         Raises:
             SubtitleError: 生成失败
         """
-        if not Path(audio_path).exists():
-            raise SubtitleError(f"音频文件不存在: {audio_path}")
+        video_path = self._resolve_video_path(video_path)
+        if not Path(video_path).exists():
+            raise SubtitleError(f"视频文件不存在: {video_path}")
 
         try:
             output_dir = self.config.get_output_dir() / "subtitle"
@@ -81,11 +82,12 @@ class SubtitleGenerator:
             srt_path = str(output_dir / generate_unique_filename("srt", "sub"))
 
             if text:
-                # 基于文本和音频长度生成简单字幕
-                duration = self._get_audio_duration(audio_path)
+                # 基于文本和视频时长生成简单字幕
+                duration = self._get_media_duration(video_path)
                 srt_content = self._text_to_srt(text, duration)
             else:
-                # 使用 ASR 带时间戳转录
+                # 先提取音频，再使用 ASR 带时间戳转录
+                audio_path = self._extract_audio(video_path, output_dir)
                 from src.audio.asr import ASREngine
                 asr = ASREngine()
                 segments = await asr.transcribe_with_timestamps(audio_path)
@@ -127,6 +129,7 @@ class SubtitleGenerator:
         Raises:
             SubtitleError: 添加失败
         """
+        video_path = self._resolve_video_path(video_path)
         if not Path(video_path).exists():
             raise SubtitleError(f"视频文件不存在: {video_path}")
 
@@ -143,8 +146,11 @@ class SubtitleGenerator:
             fc = self._hex_to_ass_color(font_color)
             oc = self._hex_to_ass_color(outline_color)
 
+            # Windows 路径：统一用正斜杠，并转义冒号（FFmpeg filtergraph 把 : 当参数分隔符）
+            srt_path_fwd = srt_path.replace("\\", "/").replace(":", "\\:")
+
             subtitle_filter = (
-                f"subtitles={srt_path}:force_style='"
+                f"subtitles=filename='{srt_path_fwd}':force_style='"
                 f"FontName={font_family},"
                 f"FontSize={font_size},"
                 f"PrimaryColour={fc},"
@@ -162,12 +168,14 @@ class SubtitleGenerator:
                 output_path,
             ]
 
+            logger.info(f"[subtitle] FFmpeg 命令: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=300
             )
 
             if result.returncode != 0:
-                raise SubtitleError(f"FFmpeg 字幕添加失败: {result.stderr}")
+                logger.error(f"[subtitle] FFmpeg stderr: {result.stderr[-2000:]}")
+                raise SubtitleError(f"FFmpeg 字幕添加失败: {result.stderr[-500:]}")
 
             logger.info(f"字幕已添加到视频: {output_path}")
             return output_path
@@ -179,17 +187,55 @@ class SubtitleGenerator:
         except Exception as e:
             raise SubtitleError(f"字幕添加失败: {e}") from e
 
-    def _get_audio_duration(self, audio_path: str) -> float:
-        """获取音频时长（秒）"""
+    def _resolve_video_path(self, video_path: str) -> str:
+        """将容器内裸路径（如 /uuid-r.mp4）解析为宿主机 output/avatar/ 路径"""
+        p = Path(video_path)
+        # 已是宿主机绝对路径且存在，直接返回
+        if p.exists():
+            return video_path
+        # 容器内路径：以 / 开头但在宿主机不存在（如 /uuid-r.mp4 或 /code/data/temp/uuid-r.mp4）
+        if video_path.startswith("/"):
+            avatar_dir = self.config.get_output_dir() / "avatar"
+            candidate = avatar_dir / p.name
+            if candidate.exists():
+                logger.info(f"[subtitle] 路径映射: {video_path} → {candidate}")
+                return str(candidate)
+        return video_path
+
+    def _get_ffprobe_path(self) -> str:
+        """从 ffmpeg 路径推导出 ffprobe 路径"""
+        p = Path(self.ffmpeg)
+        ffprobe = p.parent / ("ffprobe" + p.suffix)
+        return str(ffprobe) if ffprobe.exists() else "ffprobe"
+
+    def _get_media_duration(self, media_path: str) -> float:
+        """获取音视频文件时长（秒）"""
         cmd = [
-            self.ffmpeg.replace("ffmpeg", "ffprobe") if "ffmpeg" in self.ffmpeg else "ffprobe",
+            self._get_ffprobe_path(),
             "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
-            audio_path,
+            media_path,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         return float(result.stdout.strip())
+
+    def _extract_audio(self, video_path: str, output_dir: Path) -> str:
+        """从视频提取音频 WAV 文件，供 ASR 使用"""
+        audio_path = str(output_dir / generate_unique_filename("wav", "audio"))
+        cmd = [
+            self.ffmpeg,
+            "-i", video_path,
+            "-vn",
+            "-ar", "16000",
+            "-ac", "1",
+            "-y",
+            audio_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise SubtitleError(f"音频提取失败: {result.stderr}")
+        return audio_path
 
     def _text_to_srt(self, text: str, duration: float) -> str:
         """将文本按句分割生成简单 SRT"""

@@ -24,6 +24,7 @@ export interface BGMRequest {
 export interface CoverRequest {
     video_path: string
     text?: string
+    script_text?: string
     highlight_words?: string
     use_ai: boolean
     api_key?: string
@@ -47,6 +48,14 @@ export const videoApi = {
 
     addBgm: (data: BGMRequest) =>
         client.post('/api/video/bgm/add', data),
+
+    uploadBgm: (file: File) => {
+        const form = new FormData()
+        form.append('file', file)
+        return client.post<{ name: string; path: string }>('/api/video/bgm/upload', form, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+        })
+    },
 
     generateCover: (data: CoverRequest) =>
         client.post('/api/video/cover', data),

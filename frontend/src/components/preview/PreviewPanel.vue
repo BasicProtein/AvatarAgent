@@ -30,16 +30,23 @@ const previewDescription = computed(() => {
   return pipeline.description || ''
 })
 
-const videoSrc = computed(() => {
-  const path = pipeline.finalVideoPath || pipeline.avatarVideoPath
-  if (!path) return ''
-  return `/output/${path.split(/[/\\]/).pop()}`
-})
+/** 将服务端绝对路径转为前端可访问的 /output/... URL */
+function toOutputUrl(absPath: string): string {
+  if (!absPath) return ''
+  // 统一为正斜杠，截取 output/ 之后的部分
+  const normalized = absPath.replace(/\\/g, '/')
+  const marker = '/output/'
+  const idx = normalized.toLowerCase().indexOf(marker)
+  if (idx !== -1) return '/output/' + normalized.slice(idx + marker.length)
+  // fallback: 只取文件名
+  return '/output/' + normalized.split('/').pop()
+}
 
-const coverSrc = computed(() => {
-  if (!pipeline.coverPath) return ''
-  return `/output/${pipeline.coverPath.split(/[/\\]/).pop()}`
-})
+const videoSrc = computed(() => toOutputUrl(pipeline.finalVideoPath || pipeline.avatarVideoPath))
+
+const audioSrc = computed(() => toOutputUrl(pipeline.audioPath))
+
+const coverSrc = computed(() => toOutputUrl(pipeline.coverPath))
 </script>
 
 <template>
@@ -85,10 +92,15 @@ const coverSrc = computed(() => {
 
         <!-- Audio preview -->
         <template v-else-if="previewType === 'audio'">
-          <div class="phone-content audio-preview">
+          <div class="phone-content audio-preview" v-if="audioSrc">
+            <el-icon :size="40" color="var(--color-primary)"><Microphone /></el-icon>
+            <p class="audio-label">语音合成完成</p>
+            <audio :src="audioSrc" controls class="phone-audio" />
+          </div>
+          <div class="phone-content audio-preview" v-else>
             <el-icon :size="48" color="var(--color-primary)"><Microphone /></el-icon>
             <p class="audio-label">语音合成</p>
-            <p class="audio-hint">合成完成后可在编辑区试听</p>
+            <p class="audio-hint">合成完成后可在此试听</p>
           </div>
         </template>
 
@@ -288,6 +300,11 @@ const coverSrc = computed(() => {
 .audio-hint {
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
+}
+
+.phone-audio {
+  width: 100%;
+  margin-top: var(--space-2);
 }
 
 /* Bottom bar */

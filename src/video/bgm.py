@@ -114,7 +114,8 @@ class BGMManager:
         """
         bgm_list = self.list_bgm()
         if not bgm_list:
-            raise BGMError("没有可用的 BGM，请在 resources/bgm/ 目录放置音乐文件")
+            logger.warning("resources/bgm/ 目录下没有 BGM 文件，跳过背景音乐")
+            return video_path
 
         chosen = random.choice(bgm_list)
         logger.info(f"随机选择 BGM: {chosen['name']}")

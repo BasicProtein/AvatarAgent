@@ -214,14 +214,23 @@ class HeyGemEngine:
         if not output_video_path:
             raise AvatarGenerateError("HeyGem 生成超时或未返回视频路径")
 
-        # 将容器内路径 /code/data/temp/xxx.mp4 转换为宿主机路径
+        # 将容器内路径转换为宿主机路径
         # 容器的 /code/data/temp 已挂载到 output/avatar/
+        # HeyGem 实际返回格式有两种：
+        #   1. /code/data/temp/xxx.mp4
+        #   2. /xxx.mp4（根目录裸文件名，实为 /code/data/temp/xxx.mp4 的简写）
         container_temp = "/code/data/temp"
         avatar_host_dir = str(self.config.get_output_dir() / "avatar")
+        original_path = output_video_path
         if output_video_path.startswith(container_temp):
             filename = output_video_path[len(container_temp):].lstrip("/")
             output_video_path = str(Path(avatar_host_dir) / filename)
-            _log(f"[HeyGem] 结果路径映射: {inner.get('result','')} → {output_video_path}")
+        elif output_video_path.startswith("/") and not Path(output_video_path).exists():
+            # 容器内裸路径（如 /uuid-r.mp4），取文件名映射到宿主机 output/avatar/
+            filename = Path(output_video_path).name
+            output_video_path = str(Path(avatar_host_dir) / filename)
+        if output_video_path != original_path:
+            _log(f"[HeyGem] 结果路径映射: {original_path} → {output_video_path}")
 
         _log(f"[HeyGem] 视频生成完成: {output_video_path}")
         return {"video_path": output_video_path}

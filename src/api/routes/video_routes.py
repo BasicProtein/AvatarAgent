@@ -1,10 +1,13 @@
 """视频后期处理路由"""
 
-from fastapi import APIRouter
+import shutil
+from pathlib import Path
+
+from fastapi import APIRouter, UploadFile, File, HTTPException
 
 from src.api.schemas.models import SubtitleRequest, BGMRequest, CoverRequest, StatusResponse
 from src.video.subtitle import SubtitleGenerator, get_font_families
-from src.video.bgm import BGMManager
+from src.video.bgm import BGMManager, BGM_DIR
 from src.video.cover import CoverGenerator
 from src.common.logger import get_logger
 
@@ -21,8 +24,10 @@ async def list_fonts():
 @router.post("/subtitle")
 async def add_subtitle(req: SubtitleRequest):
     """生成字幕并添加到视频"""
+    logger.info(f"[subtitle] 收到请求: video_path={req.video_path!r}")
     gen = SubtitleGenerator()
     srt_path = await gen.generate_srt(req.video_path, req.text, req.api_key)
+    logger.info(f"[subtitle] SRT 生成完成: {srt_path}")
     video_path = await gen.add_to_video(
         req.video_path,
         srt_path,
@@ -65,7 +70,7 @@ async def generate_cover(req: CoverRequest):
     """生成视频封面"""
     gen = CoverGenerator()
     if req.use_ai:
-        cover_path = await gen.generate_with_ai(req.video_path, req.api_key)
+        cover_path = await gen.generate_with_ai(req.video_path, req.api_key, script_text=req.script_text)
     else:
         cover_path = await gen.generate(
             video_path=req.video_path,
@@ -79,3 +84,26 @@ async def generate_cover(req: CoverRequest):
             frame_time=req.frame_time,
         )
     return {"cover_path": cover_path}
+
+
+@router.post("/bgm/upload")
+async def upload_bgm(file: UploadFile = File(...)):
+    """上传 BGM 音频文件到 resources/bgm/ 目录"""
+    allowed_ext = {".mp3", ".wav", ".flac", ".aac", ".m4a"}
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in allowed_ext:
+        raise HTTPException(status_code=400, detail=f"不支持的文件格式 {suffix}，支持: {', '.join(allowed_ext)}")
+
+    BGM_DIR.mkdir(parents=True, exist_ok=True)
+    dest = BGM_DIR / (Path(file.filename).stem + suffix)
+    # 若同名则加序号
+    counter = 1
+    while dest.exists():
+        dest = BGM_DIR / f"{Path(file.filename).stem}_{counter}{suffix}"
+        counter += 1
+
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    logger.info(f"BGM 上传成功: {dest}")
+    return {"name": dest.stem, "path": str(dest)}

@@ -156,6 +156,7 @@ class CoverRequest(BaseModel):
     """封面生成请求"""
     video_path: str = Field(..., description="视频路径")
     text: str = Field("", description="封面文案")
+    script_text: str = Field("", description="口播文案（AI 模式用于生成封面标题）")
     highlight_words: str = Field("", description="高亮词（逗号分隔）")
     use_ai: bool = Field(False, description="是否使用 AI 生成文案")
     api_key: str = Field("", description="Deepseek API Key（AI 模式必填）")
