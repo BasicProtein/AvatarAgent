@@ -232,8 +232,43 @@ class HeyGemEngine:
         if output_video_path != original_path:
             _log(f"[HeyGem] 结果路径映射: {original_path} → {output_video_path}")
 
+        # 将 moov atom 移到文件头（faststart），确保浏览器能直接播放
+        output_video_path = await self._remux_faststart(output_video_path, _log)
+
         _log(f"[HeyGem] 视频生成完成: {output_video_path}")
         return {"video_path": output_video_path}
+
+    async def _remux_faststart(self, video_path: str, log_fn=None) -> str:
+        """用 ffmpeg -movflags +faststart 重新封装视频，将 moov 移到文件头。
+
+        失败时原样返回，不抛异常。
+        """
+        import subprocess
+        src = Path(video_path)
+        if not src.exists():
+            return video_path
+        tmp = src.with_suffix(".faststart.mp4")
+        ffmpeg = self.config.get_ffmpeg_path()
+        try:
+            result = subprocess.run(
+                [ffmpeg, "-i", str(src), "-c", "copy", "-movflags", "+faststart", "-y", str(tmp)],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0 and tmp.exists():
+                tmp.replace(src)
+                if log_fn:
+                    log_fn(f"[HeyGem] faststart 重封装完成: {src.name}")
+            else:
+                if tmp.exists():
+                    tmp.unlink(missing_ok=True)
+                if log_fn:
+                    log_fn(f"[HeyGem] faststart 重封装失败，跳过")
+        except Exception as e:
+            if log_fn:
+                log_fn(f"[HeyGem] faststart 重封装异常: {e}")
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+        return video_path
 
     async def check_service(self) -> bool:
         """检查 HeyGem 服务是否可用"""
@@ -347,6 +382,23 @@ class TuiliONNXEngine:
                         with open(output_path, "wb") as f:
                             f.write(response.content)
                         result["video_path"] = output_path
+
+                    # faststart 重封装
+                    if result.get("video_path"):
+                        import subprocess as _sp
+                        src = Path(result["video_path"])
+                        tmp = src.with_suffix(".faststart.mp4")
+                        ffmpeg = self.config.get_ffmpeg_path()
+                        try:
+                            r = _sp.run(
+                                [ffmpeg, "-i", str(src), "-c", "copy", "-movflags", "+faststart", "-y", str(tmp)],
+                                capture_output=True, text=True, timeout=120,
+                            )
+                            if r.returncode == 0 and tmp.exists():
+                                tmp.replace(src)
+                        except Exception:
+                            if tmp.exists():
+                                tmp.unlink(missing_ok=True)
 
                     logger.info(f"TuiliONNX 数字人视频生成完成")
                     return result

@@ -56,7 +56,61 @@ const coverSrc = computed(() => toOutputUrl(pipeline.coverPath))
       <span class="preview-step-tag">{{ pipeline.activeStep }}</span>
     </div>
 
-    <div class="phone-frame">
+    <!-- Dual phone layout for postprod with cover -->
+    <div v-if="pipeline.activeStep === 'postprod'" class="dual-phone-row">
+      <!-- Left phone: cover preview -->
+      <div class="phone-col">
+        <p class="phone-col-label">封面</p>
+        <div class="phone-frame phone-frame--small">
+          <div class="phone-dynamic-island" />
+          <div class="phone-screen phone-screen--small">
+            <div class="phone-content video-preview" v-if="coverSrc">
+              <img :src="coverSrc" alt="视频封面" class="phone-cover-img" />
+            </div>
+            <div class="phone-content empty-state" v-else>
+              <el-icon :size="28" color="var(--color-text-placeholder)"><Picture /></el-icon>
+              <p>等待封面生成...</p>
+            </div>
+            <div class="phone-bottom-bar">
+              <div class="bottom-icon"><el-icon :size="16"><HomeFilled /></el-icon></div>
+              <div class="bottom-icon"><el-icon :size="16"><Search /></el-icon></div>
+              <div class="bottom-icon center"><el-icon :size="20"><Plus /></el-icon></div>
+              <div class="bottom-icon"><el-icon :size="16"><ChatDotRound /></el-icon></div>
+              <div class="bottom-icon"><el-icon :size="16"><User /></el-icon></div>
+            </div>
+          </div>
+          <div class="phone-home-indicator" />
+        </div>
+      </div>
+
+      <!-- Right phone: video preview -->
+      <div class="phone-col">
+        <p class="phone-col-label">视频</p>
+        <div class="phone-frame phone-frame--small">
+          <div class="phone-dynamic-island" />
+          <div class="phone-screen phone-screen--small">
+            <div class="phone-content video-preview" v-if="videoSrc">
+              <video :src="videoSrc" controls class="phone-video" />
+            </div>
+            <div class="phone-content empty-state" v-else>
+              <el-icon :size="28" color="var(--color-text-placeholder)"><VideoCamera /></el-icon>
+              <p>等待视频生成...</p>
+            </div>
+            <div class="phone-bottom-bar">
+              <div class="bottom-icon"><el-icon :size="16"><HomeFilled /></el-icon></div>
+              <div class="bottom-icon"><el-icon :size="16"><Search /></el-icon></div>
+              <div class="bottom-icon center"><el-icon :size="20"><Plus /></el-icon></div>
+              <div class="bottom-icon"><el-icon :size="16"><ChatDotRound /></el-icon></div>
+              <div class="bottom-icon"><el-icon :size="16"><User /></el-icon></div>
+            </div>
+          </div>
+          <div class="phone-home-indicator" />
+        </div>
+      </div>
+    </div>
+
+    <!-- Single phone layout for all other steps -->
+    <div v-else class="phone-frame">
       <div class="phone-dynamic-island" />
       <div class="phone-screen">
         <!-- Text preview -->
@@ -114,12 +168,6 @@ const coverSrc = computed(() => toOutputUrl(pipeline.coverPath))
         </div>
       </div>
       <div class="phone-home-indicator" />
-    </div>
-
-    <!-- Cover preview -->
-    <div v-if="coverSrc" class="cover-preview">
-      <p class="cover-label">封面预览</p>
-      <img :src="coverSrc" alt="视频封面" class="cover-img" />
     </div>
   </div>
 </template>
@@ -337,22 +385,46 @@ const coverSrc = computed(() => toOutputUrl(pipeline.coverPath))
   margin: 6px auto;
 }
 
-/* Cover */
-.cover-preview {
-  align-self: stretch;
+/* Dual phone row */
+.dual-phone-row {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  justify-content: center;
+  width: 100%;
+  overflow-x: auto;
 }
 
-.cover-label {
+.phone-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.phone-col-label {
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
   text-transform: uppercase;
   font-weight: var(--font-medium);
-  margin-bottom: var(--space-2);
+  letter-spacing: 0.05em;
+  margin: 0;
 }
 
-.cover-img {
+/* Small phone variant for dual layout — same size as original */
+.phone-frame--small {
+  width: 280px;
+}
+
+.phone-screen--small {
+  height: 590px;
+}
+
+.phone-cover-img {
   width: 100%;
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
 }
 </style>

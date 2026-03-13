@@ -416,17 +416,21 @@ def start_cosyvoice(port: int = 50000, device: str | None = None) -> subprocess.
     )
 
     try:
+        log_path = PROJECT_ROOT / "logs" / "cosyvoice.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_path, "a", encoding="utf-8", buffering=1)
         proc = subprocess.Popen(
             cmd,
             cwd=str(COSYVOICE_DIR),
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=log_file,
+            stderr=log_file,
         )
         time.sleep(8)
         if proc.poll() is not None:
-            stderr = proc.stderr.read().decode("utf-8", errors="ignore")
-            logger.error("CosyVoice exited during startup: %s", stderr[:1000])
+            log_file.close()
+            stderr = log_path.read_text(encoding="utf-8", errors="ignore")[-1000:]
+            logger.error("CosyVoice exited during startup: %s", stderr)
             return None
         return proc
     except Exception as exc:

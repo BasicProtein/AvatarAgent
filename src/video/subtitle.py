@@ -164,6 +164,7 @@ class SubtitleGenerator:
                 "-i", video_path,
                 "-vf", subtitle_filter,
                 "-c:a", "copy",
+                "-movflags", "+faststart",
                 "-y",
                 output_path,
             ]

@@ -77,6 +77,7 @@ class BGMManager:
                 "-map", "[out]",
                 "-c:v", "copy",
                 "-shortest",
+                "-movflags", "+faststart",
                 "-y",
                 output_path,
             ]
