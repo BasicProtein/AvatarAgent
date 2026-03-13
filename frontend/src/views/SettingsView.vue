@@ -1,11 +1,22 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useConfigStore } from '../stores/config'
-import { configApi, type CloudGpuConfig, type CosyVoiceRuntimeStatus, type LocalAsrStatus, type CosyVoiceModelsStatus, type HeyGemPathConfig } from '../api/config'
+import { configApi, type CloudGpuConfig, type CosyVoiceRuntimeStatus, type LocalAsrStatus, type CosyVoiceModelsStatus, type HeyGemPathConfig, type CosyVoiceApiConfig } from '../api/config'
 import { ElMessage } from 'element-plus'
 
 const configStore = useConfigStore()
 const newKey = ref('')
+
+// ── CosyVoice API 配置 ───────────────────────────────────────────────────────
+const cosyvoiceApi = ref<CosyVoiceApiConfig>({
+  enabled: true,
+  api_key: '',
+  model: 'cosyvoice-v2',
+  voice: 'longxiaochun',
+})
+const cosyvoiceApiSaving = ref(false)
+const cosyvoiceApiTesting = ref(false)
+const cosyvoiceApiTestResult = ref<{ status: string; message: string } | null>(null)
 
 // ── 云端 GPU 配置 ────────────────────────────────────────────────────────────
 const cloudGpu = ref<CloudGpuConfig>({ enabled: false, api_url: '', api_key: '' })
@@ -56,6 +67,11 @@ const localAsrStatusLabel = computed(() => {
 onMounted(async () => {
   configStore.fetchApiKeys()
   configStore.fetchServices()
+  // 加载 CosyVoice API 配置
+  try {
+    const res = await configApi.getCosyVoiceApi()
+    cosyvoiceApi.value = res.data
+  } catch { /* 忽略 */ }
   // 加载云端 GPU 配置
   try {
     const res = await configApi.getCloudGpu()
@@ -170,6 +186,39 @@ async function saveWhisperDevice() {
     ElMessage.error('保存失败')
   } finally {
     deviceSaving.value = false
+  }
+}
+
+async function saveCosyVoiceApi() {
+  cosyvoiceApiSaving.value = true
+  try {
+    await configApi.setCosyVoiceApi(cosyvoiceApi.value)
+    ElMessage.success('CosyVoice API 配置已保存')
+    cosyvoiceApiTestResult.value = null
+  } catch (err: any) {
+    ElMessage.error(err.message || '保存失败')
+  } finally {
+    cosyvoiceApiSaving.value = false
+  }
+}
+
+async function testCosyVoiceApi() {
+  await saveCosyVoiceApi()
+  cosyvoiceApiTesting.value = true
+  cosyvoiceApiTestResult.value = null
+  try {
+    const res = await configApi.testCosyVoiceApi()
+    cosyvoiceApiTestResult.value = res.data
+    if (res.data.status === 'online') {
+      ElMessage.success(res.data.message)
+    } else {
+      ElMessage.error(res.data.message || '连接失败')
+    }
+  } catch {
+    cosyvoiceApiTestResult.value = { status: 'error', message: '请求异常' }
+    ElMessage.error('测试请求失败')
+  } finally {
+    cosyvoiceApiTesting.value = false
   }
 }
 
@@ -296,6 +345,174 @@ async function testCloudGpu() {
           </el-button>
         </div>
         <p v-if="configStore.apiKeys.length === 0" class="hint">暂未配置 API Key</p>
+      </div>
+    </div>
+
+    <!-- CosyVoice 语音合成（API + 本地合并） -->
+    <div class="settings-section">
+      <h2 class="section-title">CosyVoice 语音合成</h2>
+      <p class="section-desc">
+        默认优先使用阿里云 DashScope API，无需本地部署。<br />
+        关闭后回退到本地 CosyVoice 服务，可在下方配置推理设备。
+      </p>
+
+      <div class="cloud-gpu-panel">
+        <!-- 模式切换开关 -->
+        <div class="setting-item">
+          <div class="setting-info">
+            <h3>优先使用云端 API</h3>
+            <p>开启后调用 DashScope API 合成，关闭后使用本地 CosyVoice 服务</p>
+          </div>
+          <el-switch v-model="cosyvoiceApi.enabled" active-text="开启" inactive-text="关闭" />
+        </div>
+
+        <!-- ── API 模式配置 ── -->
+        <template v-if="cosyvoiceApi.enabled">
+          <div class="api-fields-card">
+            <div class="field-row">
+              <label class="field-label">DashScope API Key</label>
+              <el-input
+                v-model="cosyvoiceApi.api_key"
+                placeholder="sk-..."
+                size="large"
+                show-password
+                clearable
+              >
+                <template #prepend>KEY</template>
+              </el-input>
+              <p class="field-hint">在 <code>dashscope.aliyun.com</code> 控制台获取</p>
+            </div>
+
+            <div class="field-row">
+              <label class="field-label">模型</label>
+              <el-select v-model="cosyvoiceApi.model" size="large" style="width: 100%;">
+                <el-option label="cosyvoice-v2（推荐）" value="cosyvoice-v2" />
+                <el-option label="cosyvoice" value="cosyvoice" />
+              </el-select>
+            </div>
+
+            <div class="field-row">
+              <label class="field-label">预设音色</label>
+              <el-select v-model="cosyvoiceApi.voice" size="large" style="width: 100%;">
+                <el-option label="龙小淳（longxiaochun）" value="longxiaochun" />
+                <el-option label="龙小白（longxiaobai）" value="longxiaobai" />
+                <el-option label="龙老铁（longlaotie）" value="longlaotie" />
+                <el-option label="龙婉儿（longwaner）" value="longwaner" />
+                <el-option label="龙媛儿（longyuaner）" value="longyuaner" />
+                <el-option label="龙硕（longshuo）" value="longshuo" />
+              </el-select>
+              <p class="field-hint">使用 API 时忽略本地上传的音色文件，使用阿里云预设音色</p>
+            </div>
+          </div>
+
+          <div class="cloud-gpu-actions">
+            <el-button type="primary" :loading="cosyvoiceApiSaving" @click="saveCosyVoiceApi">
+              保存配置
+            </el-button>
+            <el-button :loading="cosyvoiceApiTesting" @click="testCosyVoiceApi">
+              测试连接
+            </el-button>
+          </div>
+
+          <div v-if="cosyvoiceApiTestResult" class="test-result" :class="cosyvoiceApiTestResult.status">
+            <template v-if="cosyvoiceApiTestResult.status === 'online'">
+              ✅ {{ cosyvoiceApiTestResult.message }}
+            </template>
+            <template v-else>
+              ❌ {{ cosyvoiceApiTestResult.message }}
+            </template>
+          </div>
+        </template>
+
+        <!-- ── 本地模式配置 ── -->
+        <template v-else>
+          <div class="setting-item">
+            <div class="setting-info">
+              <h3>推理设备</h3>
+              <p>修改后需重启 CosyVoice 服务才会生效。</p>
+            </div>
+            <el-select v-model="cosyvoiceRuntime.device" style="width: 180px;" size="large">
+              <el-option label="GPU（默认）" value="gpu" />
+              <el-option label="CPU" value="cpu" />
+            </el-select>
+          </div>
+
+          <div class="asr-detail-grid">
+            <div class="asr-detail-item">
+              <span class="detail-label">Torch CUDA</span>
+              <span :class="cosyvoiceRuntime.torch_cuda_available ? 'ok' : 'warn'">
+                {{ cosyvoiceRuntime.torch_cuda_available ? '可用' : '不可用' }}
+              </span>
+            </div>
+            <div class="asr-detail-item">
+              <span class="detail-label">ONNX Runtime GPU</span>
+              <span :class="cosyvoiceRuntime.onnxruntime_gpu_installed ? 'ok' : 'warn'">
+                {{ cosyvoiceRuntime.onnxruntime_gpu_installed ? '已安装' : '未安装' }}
+              </span>
+            </div>
+            <div class="asr-detail-item">
+              <span class="detail-label">GPU 就绪</span>
+              <span :class="cosyvoiceRuntime.can_use_gpu ? 'ok' : 'warn'">
+                {{ cosyvoiceRuntime.can_use_gpu ? '是' : '否' }}
+              </span>
+            </div>
+            <div class="asr-detail-item">
+              <span class="detail-label">显卡</span>
+              <span :class="cosyvoiceRuntime.gpu_name ? 'ok' : 'warn'">
+                {{ cosyvoiceRuntime.gpu_name || '未检测到' }}
+              </span>
+            </div>
+          </div>
+
+          <div class="cloud-gpu-actions">
+            <el-button type="primary" :loading="cosyvoiceSaving" @click="saveCosyVoiceRuntime">
+              保存设置
+            </el-button>
+            <el-button :loading="cosyvoiceRestarting" @click="restartCosyVoice">
+              重启服务
+            </el-button>
+            <el-button @click="refreshCosyVoiceRuntime">
+              刷新状态
+            </el-button>
+          </div>
+
+          <!-- 本地模型缓存 -->
+          <div class="models-panel">
+            <div class="models-panel-header">
+              <div>
+                <p class="models-panel-title">本地模型缓存</p>
+                <p class="models-panel-desc">
+                  模型缓存在项目目录内，<strong>平时完全离线运行</strong>，不会自动联网检查更新。
+                  如需获取最新模型版本，请手动点击下方按钮。
+                </p>
+              </div>
+              <el-button size="small" :loading="cosyvoiceModelsLoading" @click="refreshCosyVoiceModels">
+                <el-icon><Refresh /></el-icon>
+              </el-button>
+            </div>
+
+            <div v-if="cosyvoiceModels" class="models-list">
+              <div v-for="m in cosyvoiceModels.models" :key="m.name" class="model-cache-item">
+                <span class="model-cache-name">{{ m.name }}</span>
+                <span class="model-cache-badge" :class="m.cached ? 'cached' : 'missing'">
+                  {{ m.cached ? '已缓存' : '未下载' }}
+                </span>
+              </div>
+            </div>
+
+            <div class="models-update-row">
+              <el-button type="primary" :loading="cosyvoiceModelsUpdating" @click="updateCosyVoiceModels">
+                {{ cosyvoiceModelsUpdating ? '更新中...' : '更新模型' }}
+              </el-button>
+              <span class="models-update-hint">将联网拉取最新版本，缓存到项目目录</span>
+            </div>
+
+            <div v-if="cosyvoiceModelsUpdateResult" class="models-update-result" :class="cosyvoiceModelsUpdateResult.status">
+              {{ cosyvoiceModelsUpdateResult.status === 'success' ? '✅' : cosyvoiceModelsUpdateResult.status === 'partial' ? '⚠️' : '❌' }}
+              {{ cosyvoiceModelsUpdateResult.message }}
+            </div>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -489,112 +706,6 @@ async function testCloudGpu() {
       </div>
     </div>
 
-    <div class="settings-section">
-      <h2 class="section-title">CosyVoice 运行设置</h2>
-      <p class="section-desc">默认使用 GPU。只有在你明确需要 CPU 推理时，才切换到 CPU。</p>
-      <div class="setting-item">
-        <div class="setting-info">
-          <h3>推理设备</h3>
-          <p>修改后需重启 CosyVoice 服务才会生效。</p>
-        </div>
-        <el-select v-model="cosyvoiceRuntime.device" style="width: 180px;" size="large">
-          <el-option label="GPU（默认）" value="gpu" />
-          <el-option label="CPU" value="cpu" />
-        </el-select>
-      </div>
-
-      <div class="asr-detail-grid" style="margin-top: var(--space-3);">
-        <div class="asr-detail-item">
-          <span class="detail-label">Torch CUDA</span>
-          <span :class="cosyvoiceRuntime.torch_cuda_available ? 'ok' : 'warn'">
-            {{ cosyvoiceRuntime.torch_cuda_available ? '可用' : '不可用' }}
-          </span>
-        </div>
-        <div class="asr-detail-item">
-          <span class="detail-label">ONNX Runtime GPU</span>
-          <span :class="cosyvoiceRuntime.onnxruntime_gpu_installed ? 'ok' : 'warn'">
-            {{ cosyvoiceRuntime.onnxruntime_gpu_installed ? '已安装' : '未安装' }}
-          </span>
-        </div>
-        <div class="asr-detail-item">
-          <span class="detail-label">GPU 就绪</span>
-          <span :class="cosyvoiceRuntime.can_use_gpu ? 'ok' : 'warn'">
-            {{ cosyvoiceRuntime.can_use_gpu ? '是' : '否' }}
-          </span>
-        </div>
-        <div class="asr-detail-item">
-          <span class="detail-label">显卡</span>
-          <span :class="cosyvoiceRuntime.gpu_name ? 'ok' : 'warn'">
-            {{ cosyvoiceRuntime.gpu_name || '未检测到' }}
-          </span>
-        </div>
-      </div>
-
-      <div class="cloud-gpu-actions">
-        <el-button type="primary" :loading="cosyvoiceSaving" @click="saveCosyVoiceRuntime">
-          保存设置
-        </el-button>
-        <el-button :loading="cosyvoiceRestarting" @click="restartCosyVoice">
-          重启服务
-        </el-button>
-        <el-button @click="refreshCosyVoiceRuntime">
-          刷新状态
-        </el-button>
-      </div>
-
-      <!-- 模型缓存管理 -->
-      <div class="models-panel">
-        <div class="models-panel-header">
-          <div>
-            <p class="models-panel-title">本地模型缓存</p>
-            <p class="models-panel-desc">
-              模型缓存在项目目录内，<strong>平时完全离线运行</strong>，不会自动联网检查更新。
-              如需获取最新模型版本，请手动点击下方按钮。
-            </p>
-          </div>
-          <el-button
-            size="small"
-            :loading="cosyvoiceModelsLoading"
-            @click="refreshCosyVoiceModels"
-          >
-            <el-icon><Refresh /></el-icon>
-          </el-button>
-        </div>
-
-        <div v-if="cosyvoiceModels" class="models-list">
-          <div
-            v-for="m in cosyvoiceModels.models"
-            :key="m.name"
-            class="model-cache-item"
-          >
-            <span class="model-cache-name">{{ m.name }}</span>
-            <span class="model-cache-badge" :class="m.cached ? 'cached' : 'missing'">
-              {{ m.cached ? '已缓存' : '未下载' }}
-            </span>
-          </div>
-        </div>
-
-        <div class="models-update-row">
-          <el-button
-            type="primary"
-            :loading="cosyvoiceModelsUpdating"
-            @click="updateCosyVoiceModels"
-          >
-            {{ cosyvoiceModelsUpdating ? '更新中...' : '更新模型' }}
-          </el-button>
-          <span class="models-update-hint">将联网拉取最新版本，缓存到项目目录</span>
-        </div>
-
-        <div
-          v-if="cosyvoiceModelsUpdateResult"
-          class="models-update-result"
-          :class="cosyvoiceModelsUpdateResult.status"
-        >
-          {{ cosyvoiceModelsUpdateResult.status === 'success' ? '✅' : cosyvoiceModelsUpdateResult.status === 'partial' ? '⚠️' : '❌' }}
-          {{ cosyvoiceModelsUpdateResult.message }}
-        </div>
-      </div>
-    </div>
 
     <!-- HeyGem Docker 路径配置 -->
     <div class="settings-section">
@@ -891,6 +1002,33 @@ code.cmd {
 .models-update-result.success { background: rgba(39,174,96,0.08); border-color: rgba(39,174,96,0.3); color: #1e9e5c; }
 .models-update-result.partial { background: rgba(243,156,18,0.08); border-color: rgba(243,156,18,0.3); color: #d68910; }
 .models-update-result.error   { background: rgba(192,57,43,0.08); border-color: rgba(192,57,43,0.3); color: #a93226; }
+
+/* ── CosyVoice API 配置字段卡片 ──────────────────────────────────────── */
+.api-fields-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border-light);
+  border-radius: 16px;
+}
+/* 修复 Element Plus prepend input 圆角 */
+.api-fields-card :deep(.el-input-group__prepend) {
+  border-radius: 10px 0 0 10px;
+}
+.api-fields-card :deep(.el-input-group__append) {
+  border-radius: 0 10px 10px 0;
+}
+.api-fields-card :deep(.el-input-group > .el-input__wrapper) {
+  border-radius: 0 10px 10px 0;
+}
+.api-fields-card :deep(.el-input__wrapper) {
+  border-radius: 10px;
+}
+.api-fields-card :deep(.el-select .el-input__wrapper) {
+  border-radius: 10px;
+}
 
 /* ── HeyGem 路径配置面板 ───────────────────────────────────────────────── */
 .heygem-path-panel {

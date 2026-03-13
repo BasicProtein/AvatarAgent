@@ -55,6 +55,13 @@ export interface CosyVoiceRestartResponse {
     stopped_pids?: number[]
 }
 
+export interface CosyVoiceApiConfig {
+    enabled: boolean
+    api_key: string
+    model: string
+    voice: string
+}
+
 export interface HeyGemPathConfig {
     audio_host_dir: string
     audio_container_dir: string
@@ -114,6 +121,17 @@ export const configApi = {
 
     updateCosyVoiceModels: () =>
         client.post<CosyVoiceModelsUpdateResult>('/api/config/cosyvoice-models/update', {}),
+
+    // ── CosyVoice API ─────────────────────────────────────────────────────────
+
+    getCosyVoiceApi: () =>
+        client.get<CosyVoiceApiConfig>('/api/config/cosyvoice-api'),
+
+    setCosyVoiceApi: (data: CosyVoiceApiConfig) =>
+        client.post<{ status: string; enabled: boolean }>('/api/config/cosyvoice-api', data),
+
+    testCosyVoiceApi: () =>
+        client.post<{ status: string; message: string }>('/api/config/cosyvoice-api/test', {}),
 
     // ── HeyGem 路径映射 ───────────────────────────────────────────────────────
 

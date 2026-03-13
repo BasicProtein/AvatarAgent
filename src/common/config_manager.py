@@ -86,6 +86,14 @@ class ConfigManager:
         self._config.set(section, key, value)
         self._save()
 
+    def set_many(self, section: str, values: dict) -> None:
+        """一次性更新同一 section 的多个 key，只写一次文件。"""
+        if not self._config.has_section(section):
+            self._config.add_section(section)
+        for key, value in values.items():
+            self._config.set(section, key, str(value))
+        self._save()
+
     def _save(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         with open(CONFIG_PATH, "w", encoding="utf-8") as config_file:
@@ -166,6 +174,17 @@ class ConfigManager:
         output_dir = PROJECT_ROOT / base_dir
         output_dir.mkdir(parents=True, exist_ok=True)
         return output_dir
+
+    def is_cosyvoice_api_enabled(self) -> bool:
+        return self.get_bool("cosyvoice_api", "enabled", False)
+
+    def get_cosyvoice_api_config(self) -> dict:
+        return {
+            "enabled": self.is_cosyvoice_api_enabled(),
+            "api_key": self.get("cosyvoice_api", "api_key", ""),
+            "model": self.get("cosyvoice_api", "model", "cosyvoice-v2"),
+            "voice": self.get("cosyvoice_api", "voice", "longxiaochun"),
+        }
 
     def is_cloud_gpu_enabled(self) -> bool:
         return self.get_bool("cloud_gpu", "enabled", False)

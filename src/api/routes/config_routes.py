@@ -67,10 +67,11 @@ async def get_cloud_gpu():
 
 @router.post("/cloud-gpu")
 async def set_cloud_gpu(req: CloudGpuConfig):
-    config.set("cloud_gpu", "enabled", "true" if req.enabled else "false")
-    config.set("cloud_gpu", "api_url", req.api_url or "")
-    config.set("cloud_gpu", "api_key", req.api_key or "")
-    config.reload()
+    config.set_many("cloud_gpu", {
+        "enabled": "true" if req.enabled else "false",
+        "api_url": req.api_url or "",
+        "api_key": req.api_key or "",
+    })
     return {
         "status": "success",
         "enabled": req.enabled,
@@ -98,6 +99,67 @@ async def test_cloud_gpu():
         return {"status": "error", "message": "Cannot connect to cloud GPU endpoint."}
     except httpx.TimeoutException:
         return {"status": "error", "message": "Cloud GPU endpoint timed out."}
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+
+class CosyVoiceApiConfig(BaseModel):
+    enabled: bool
+    api_key: Optional[str] = ""
+    model: Optional[str] = "cosyvoice-v2"
+    voice: Optional[str] = "longxiaochun"
+
+
+@router.get("/cosyvoice-api")
+async def get_cosyvoice_api():
+    return config.get_cosyvoice_api_config()
+
+
+@router.post("/cosyvoice-api")
+async def set_cosyvoice_api(req: CosyVoiceApiConfig):
+    config.set_many("cosyvoice_api", {
+        "enabled": "true" if req.enabled else "false",
+        "api_key": req.api_key or "",
+        "model": req.model or "cosyvoice-v2",
+        "voice": req.voice or "longxiaochun",
+    })
+    return {"status": "success", "enabled": req.enabled}
+
+
+@router.post("/cosyvoice-api/test")
+async def test_cosyvoice_api():
+    """发送一段极短文本测试 DashScope API 连通性和 Key 有效性。"""
+    cfg = config.get_cosyvoice_api_config()
+    api_key = cfg.get("api_key", "")
+    model = cfg.get("model", "cosyvoice-v2")
+    voice = cfg.get("voice", "longxiaochun")
+
+    if not api_key:
+        return {"status": "error", "message": "API Key 未配置"}
+
+    url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/call"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "input": {"text": "你好"},
+        "parameters": {"voice": voice, "format": "wav", "sample_rate": 22050},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+            response = await client.post(url, headers=headers, json=payload)
+        content_type = response.headers.get("content-type", "")
+        if response.status_code == 200 and ("audio" in content_type or "octet-stream" in content_type):
+            return {"status": "online", "message": f"API 可用，模型：{model}，音色：{voice}"}
+        else:
+            detail = response.text[:200]
+            return {"status": "error", "message": f"HTTP {response.status_code}: {detail}"}
+    except httpx.ConnectError:
+        return {"status": "error", "message": "无法连接到 DashScope API"}
+    except httpx.TimeoutException:
+        return {"status": "error", "message": "请求超时"}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 

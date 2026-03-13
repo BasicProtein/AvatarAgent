@@ -1,8 +1,9 @@
-"""Text-to-speech integration for CosyVoice."""
+"""Text-to-speech integration for CosyVoice (local) and DashScope API."""
 
 from __future__ import annotations
 
 import io
+import json
 import re
 import subprocess
 import wave
@@ -175,6 +176,18 @@ class TTSEngine:
         speed: float = 1.0,
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> str:
+        # Prefer DashScope API when enabled
+        api_cfg = self.config.get_cosyvoice_api_config()
+        if api_cfg.get("enabled") and api_cfg.get("api_key"):
+            return await self._synthesize_via_api(
+                text=text,
+                speed=speed,
+                api_key=api_cfg["api_key"],
+                model=api_cfg.get("model", "cosyvoice-v2"),
+                voice=api_cfg.get("voice", "longxiaochun"),
+                on_progress=on_progress,
+            )
+
         voices = self.list_voices()
         if not voices:
             raise TTSError("No voice samples found under resources/voices.")
@@ -208,6 +221,90 @@ class TTSEngine:
         logger.info("Speech synthesis finished: %s", output_path)
         if on_progress:
             on_progress(f"合成完成：{output_path}")
+        return output_path
+
+    async def _synthesize_via_api(
+        self,
+        text: str,
+        speed: float = 1.0,
+        api_key: str = "",
+        model: str = "cosyvoice-v2",
+        voice: str = "longxiaochun",
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """使用 DashScope CosyVoice API 合成语音，返回输出文件路径。"""
+        normalized = _normalize_text(text)
+        if not normalized:
+            raise TTSError("Text is empty. Nothing to synthesize.")
+
+        if on_progress:
+            on_progress(f"[API] 使用 DashScope CosyVoice API，音色：{voice}，语速：{speed}x")
+
+        # DashScope TTS streaming API
+        url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/call"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-DashScope-DataInspection": "enable",
+        }
+        payload = {
+            "model": model,
+            "input": {"text": normalized},
+            "parameters": {
+                "voice": voice,
+                "format": "wav",
+                "sample_rate": 22050,
+                "rate": speed,
+            },
+        }
+
+        if on_progress:
+            on_progress("[API] 正在请求 DashScope 语音合成...")
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0), trust_env=False) as client:
+                response = await client.post(url, headers=headers, json=payload)
+        except httpx.ConnectError as exc:
+            raise TTSError(f"无法连接到 DashScope API: {exc}") from exc
+        except httpx.TimeoutException as exc:
+            raise TTSError(f"DashScope API 请求超时") from exc
+        except httpx.RequestError as exc:
+            raise TTSError(f"DashScope API 请求失败: {exc}") from exc
+
+        if response.status_code != 200:
+            detail = response.text[:300]
+            raise TTSError(f"DashScope API 返回 HTTP {response.status_code}: {detail}")
+
+        content_type = response.headers.get("content-type", "")
+        if "audio" in content_type or "octet-stream" in content_type:
+            audio_data = response.content
+        else:
+            # JSON error response
+            try:
+                body = response.json()
+            except Exception:
+                body = response.text[:300]
+            raise TTSError(f"DashScope API 返回非音频响应: {body}")
+
+        if not audio_data or len(audio_data) < 44:
+            raise TTSError("DashScope API 返回了空的音频数据")
+
+        if on_progress:
+            on_progress(f"[API] 收到音频数据（{len(audio_data) // 1024} KB），正在保存...")
+
+        output_dir = self.config.get_output_dir() / "audio"
+        ensure_dir(output_dir)
+        output_path = str(output_dir / generate_unique_filename("wav", "tts"))
+        self._save_audio(audio_data, output_path)
+
+        if abs(speed - 1.0) > 0.05:
+            if on_progress:
+                on_progress(f"[API] 正在调整语速（{speed}x）...")
+            output_path = self._adjust_speed(output_path, speed)
+
+        if on_progress:
+            on_progress(f"[API] 合成完成：{output_path}")
+        logger.info("DashScope API synthesis finished: %s", output_path)
         return output_path
 
     async def clone_voice(
